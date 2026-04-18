@@ -48,7 +48,8 @@ defmodule RlmMinimalEx.RunSupervisor do
       model_fn: opts[:model_fn],
       lane: opts[:lane] || :read_only,
       max_turns: opts[:max_turns] || 8,
-      system_prompt: opts[:system_prompt]
+      system_prompt: opts[:system_prompt],
+      conversation_history: opts[:conversation_history] || []
     ]
 
     children = [

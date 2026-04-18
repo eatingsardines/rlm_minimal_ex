@@ -14,19 +14,27 @@ defmodule RlmMinimalEx do
 
   alias RlmMinimalEx.Trajectory.Run
 
+  @type conversation_message :: %{role: :user | :assistant, content: String.t()}
+
   @type run_opts :: [
           model: String.t(),
           model_fn: (String.t(), list(), keyword() -> RlmMinimalEx.Model.response()),
           lane: :read_only | :workspace,
           max_turns: pos_integer(),
           system_prompt: String.t(),
-          context_source: {:env_var, pid(), String.t()}
+          context_source: {:env_var, pid(), String.t()},
+          conversation_history: [conversation_message()]
         ]
 
   @spec run(term(), String.t(), run_opts()) ::
           {:ok, String.t(), Run.t()} | {:error, term(), Run.t()}
   @doc """
   Runs a single session against `query` with `context` stored in the environment.
+
+  `:conversation_history` can be passed to provide prior user/assistant turns for
+  conversational continuity across multiple runs. Large source material should
+  still remain externalized in the environment rather than copied into the
+  conversation history.
   """
   def run(context, query, opts \\ []) do
     run_opts = [
@@ -37,7 +45,8 @@ defmodule RlmMinimalEx do
       lane: Keyword.get(opts, :lane, :read_only),
       max_turns: Keyword.get(opts, :max_turns, 8),
       system_prompt: opts[:system_prompt],
-      context_source: opts[:context_source]
+      context_source: opts[:context_source],
+      conversation_history: opts[:conversation_history] || []
     ]
 
     case DynamicSupervisor.start_child(

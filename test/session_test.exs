@@ -224,6 +224,122 @@ defmodule RlmMinimalEx.SessionTest do
     assert system_prompt =~ "read_lines"
     assert system_prompt =~ "write_scratchpad"
     assert system_prompt =~ "Do not answer until you have inspected the context"
+    assert system_prompt =~ "If prior conversation history is present"
+  end
+
+  test "initial messages include prior conversation history before the new query", %{env: env} do
+    parent = self()
+
+    model_fn = fn _model, messages, _opts ->
+      send(parent, {:messages_seen, messages})
+
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      {:ok, :text, "done", mc}
+    end
+
+    history = [
+      %{role: :user, content: "Which section matters most?"},
+      %{role: :assistant, content: "The processes section is the closest match."}
+    ]
+
+    {:ok, session} =
+      Session.start_link(
+        env_pid: env,
+        model_fn: model_fn,
+        max_turns: 5,
+        conversation_history: history
+      )
+
+    assert {:ok, "done", run} = Session.run(session, "deeper")
+    assert run.status == :completed
+
+    assert_receive {:messages_seen,
+                    [
+                      %{"role" => "system", "content" => _system_prompt},
+                      %{"role" => "user", "content" => "Which section matters most?"},
+                      %{
+                        "role" => "assistant",
+                        "content" => "The processes section is the closest match."
+                      },
+                      %{"role" => "user", "content" => "deeper"}
+                    ]}
+  end
+
+  test "delegated workers do not inherit prior conversation history", %{env: env} do
+    parent = self()
+    call_count = :counters.new(1, [:atomics])
+
+    model_fn = fn _model, messages, _opts ->
+      system_prompt = hd(messages)["content"]
+
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      if String.contains?(system_prompt, "focused worker agent") do
+        send(parent, {:worker_messages_seen, messages})
+        {:ok, :text, "worker answer", mc}
+      else
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
+
+        case n do
+          0 ->
+            call = %{
+              id: "call_delegate_1",
+              name: "delegate_subtask",
+              arguments: %{"task" => "subtask"}
+            }
+
+            {:ok, :tool_calls, [call],
+             %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+          _ ->
+            {:ok, :text, "top level answer", mc}
+        end
+      end
+    end
+
+    history = [
+      %{role: :user, content: "Which section matters most?"},
+      %{role: :assistant, content: "The processes section is the closest match."}
+    ]
+
+    {:ok, session} =
+      Session.start_link(
+        env_pid: env,
+        model_fn: model_fn,
+        max_turns: 5,
+        conversation_history: history
+      )
+
+    assert {:ok, "top level answer", run} = Session.run(session, "deeper")
+    assert run.status == :completed
+
+    assert_receive {:worker_messages_seen,
+                    [
+                      %{"role" => "system", "content" => worker_prompt},
+                      %{"role" => "user", "content" => "subtask"}
+                    ]}
+
+    assert worker_prompt =~ "focused worker agent"
   end
 
   test "tool call then text answer", %{env: env} do

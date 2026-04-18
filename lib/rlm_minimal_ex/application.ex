@@ -5,6 +5,7 @@ defmodule RlmMinimalEx.Application do
   Shared services:
 
   - `RlmMinimalEx.Registry` for per-run process lookup
+  - `RlmMinimalEx.ChatSessionSupervisor` for long-lived interactive chat sessions
   - `RlmMinimalEx.TaskSupervisor` for delegated one-shot worker tasks
   - `RlmMinimalEx.RunsSupervisor` for per-run supervision trees
   """
@@ -15,6 +16,7 @@ defmodule RlmMinimalEx.Application do
   def start(_type, _args) do
     children = [
       {Registry, keys: :unique, name: RlmMinimalEx.Registry},
+      {RlmMinimalEx.ChatSessionSupervisor, []},
       {Task.Supervisor, name: RlmMinimalEx.TaskSupervisor},
       {DynamicSupervisor, name: RlmMinimalEx.RunsSupervisor, strategy: :one_for_one}
     ]

@@ -5,6 +5,7 @@ defmodule RlmMinimalEx.Session do
   The initial model turn sees:
 
   - the system prompt
+  - any prior conversation history supplied for the current chat session
   - the user's query
   - the available tool definitions
 
@@ -29,7 +30,8 @@ defmodule RlmMinimalEx.Session do
     :messages,
     :run,
     :reply_to,
-    :system_prompt
+    :system_prompt,
+    :conversation_history
   ]
 
   @doc """
@@ -68,7 +70,8 @@ defmodule RlmMinimalEx.Session do
       messages: [],
       run: nil,
       reply_to: nil,
-      system_prompt: opts[:system_prompt] || default_system_prompt()
+      system_prompt: opts[:system_prompt] || default_system_prompt(),
+      conversation_history: opts[:conversation_history] || []
     }
 
     {:ok, state}
@@ -78,12 +81,7 @@ defmodule RlmMinimalEx.Session do
   def handle_call({:run, query}, from, state) do
     run = Run.new(query)
 
-    # The initial prompt contains only the system prompt and query. The model
-    # must use tools to inspect the externalized context stored in the environment.
-    messages = [
-      %{"role" => "system", "content" => state.system_prompt},
-      %{"role" => "user", "content" => query}
-    ]
+    messages = initial_messages(state, query)
 
     state = %{state | query: query, messages: messages, run: run, reply_to: from}
     send(self(), {:do_turn, 0})
@@ -173,6 +171,23 @@ defmodule RlmMinimalEx.Session do
       [{pid, _}] -> pid
       [] -> raise "Environment not found for run_id #{inspect(run_id)}"
     end
+  end
+
+  defp initial_messages(state, query) do
+    [
+      %{"role" => "system", "content" => state.system_prompt}
+      | prior_conversation_messages(state.conversation_history)
+    ] ++ [%{"role" => "user", "content" => query}]
+  end
+
+  defp prior_conversation_messages(history) do
+    Enum.map(history, fn
+      %{role: :user, content: content} ->
+        %{"role" => "user", "content" => content}
+
+      %{role: :assistant, content: content} ->
+        %{"role" => "assistant", "content" => content}
+    end)
   end
 
   defp execute_tool_calls(calls, state) do
@@ -275,15 +290,18 @@ defmodule RlmMinimalEx.Session do
     Strategy:
     1. Start by inspecting the externalized context before answering. Prefer tools such as \
     search_context, read_var, read_text_range, and read_lines to gather evidence.
-    2. If you discover a useful intermediate result, store it with write_scratchpad so you can \
+    2. If prior conversation history is present, use it to resolve follow-up questions such as \
+    "deeper", "expand that", or "what do you mean" before deciding what to inspect next. Prefer \
+    continuing the current topic when the referent is clear instead of asking the user to restate it.
+    3. If you discover a useful intermediate result, store it with write_scratchpad so you can \
     reuse it in later turns.
-    3. Use slice_text to create focused chunks when a smaller section of the context is easier \
+    4. Use slice_text to create focused chunks when a smaller section of the context is easier \
     to reason about than the whole input.
-    4. If the task is complex, break it into subtasks and delegate them only after inspecting \
+    5. If the task is complex, break it into subtasks and delegate them only after inspecting \
     the relevant context yourself.
-    5. Do not answer until you have inspected the context with at least one read/search tool \
+    6. Do not answer until you have inspected the context with at least one read/search tool \
     unless the user explicitly gave you the answer in the query itself.
-    6. When you have enough information, respond with your final answer as plain text.
+    7. When you have enough information, respond with your final answer as plain text.
 
     Be precise. Be concise. Use the tools when they help, but don't over-use them.\
     """
