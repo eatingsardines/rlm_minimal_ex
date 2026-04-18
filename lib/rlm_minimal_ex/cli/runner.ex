@@ -47,6 +47,9 @@ defmodule RlmMinimalEx.CLI.Runner do
       |> attach_initial_context(opts)
 
     say(opts, "RlmMinimalEx interactive mode")
+    say(opts, "One chat stays open until you choose Start over or Exit.")
+    say(opts, "Follow-up questions reuse the same context and recent answers.")
+    say(opts, "In paste mode, finish with /done on its own line.")
     blank(opts)
 
     final_state = loop(state, opts)
@@ -171,6 +174,7 @@ defmodule RlmMinimalEx.CLI.Runner do
   defp read_pasted_context(opts, initial_content) do
     say(opts, "Paste your context below.")
     say(opts, "Type /done on its own line, then press Enter.")
+    say(opts, "Blank lines are kept as part of the context.")
 
     case read_pasted_lines(opts, "") do
       {:done, content} -> {:ok, initial_content <> content}
@@ -241,13 +245,14 @@ defmodule RlmMinimalEx.CLI.Runner do
 
   defp print_success(answer, run, opts) do
     blank(opts)
+    say(opts, "Run summary")
     say(opts, "Answer:")
     say(opts, answer)
     blank(opts)
     say(opts, "Status: #{run.status}")
-    say(opts, "Tokens: #{run.total_tokens}")
-    say(opts, "Root steps: #{length(run.root_steps)}")
-    say(opts, "Timeline steps: #{length(run.steps)}")
+    say(opts, "Total tokens: #{run.total_tokens}")
+    say(opts, "Top-level steps: #{length(run.root_steps)}")
+    say(opts, "Timeline steps: #{length(run.steps)} (includes delegated work)")
     blank(opts)
   end
 
@@ -267,10 +272,13 @@ defmodule RlmMinimalEx.CLI.Runner do
   end
 
   defp post_run_menu(state, opts) do
-    say(opts, "What next?")
+    say(opts, "What next in this chat?")
     say(opts, "1. Ask a follow-up in the same chat")
+    say(opts, "   Keeps the same context and recent answers.")
     say(opts, "2. Show the detailed timeline")
+    say(opts, "   Shows tool calls, delegated work, and assistant text for this run.")
     say(opts, "3. Start over with new context")
+    say(opts, "   Clears this chat and loads new context.")
     say(opts, "4. Exit")
 
     case normalize_post_run_choice(IO.normalized_gets(io(opts), "> ")) do
@@ -306,17 +314,15 @@ defmodule RlmMinimalEx.CLI.Runner do
   end
 
   defp post_error_menu(state, opts) do
-    say(opts, "What next?")
+    say(opts, "What next in this chat?")
     say(opts, "1. Try another question in the same chat")
+    say(opts, "   Keeps the same context and prior successful answers.")
     say(opts, "2. Start over with new context")
+    say(opts, "   Clears this chat and loads new context.")
     say(opts, "3. Exit")
 
-    case IO.normalized_gets(io(opts), "> ") do
+    case normalize_post_error_choice(IO.normalized_gets(io(opts), "> ")) do
       "1" ->
-        blank(opts)
-        loop(state, opts)
-
-      "try again" ->
         blank(opts)
         loop(state, opts)
 
@@ -328,18 +334,7 @@ defmodule RlmMinimalEx.CLI.Runner do
           Keyword.delete(opts, :file)
         )
 
-      "start over" ->
-        blank(opts)
-
-        loop(
-          reset_chat_state(state),
-          Keyword.delete(opts, :file)
-        )
-
       "3" ->
-        state
-
-      "exit" ->
         state
 
       nil ->
@@ -357,6 +352,11 @@ defmodule RlmMinimalEx.CLI.Runner do
   defp normalize_post_run_choice("start over"), do: "3"
   defp normalize_post_run_choice("exit"), do: "4"
   defp normalize_post_run_choice(choice), do: choice
+
+  defp normalize_post_error_choice("try again"), do: "1"
+  defp normalize_post_error_choice("start over"), do: "2"
+  defp normalize_post_error_choice("exit"), do: "3"
+  defp normalize_post_error_choice(choice), do: choice
 
   defp likely_pasted_context_start?(input) do
     String.contains?(input, [" ", "\t"]) ||

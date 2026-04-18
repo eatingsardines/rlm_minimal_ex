@@ -93,12 +93,18 @@ defmodule RlmMinimalEx.CLITest do
     output = get_output.()
 
     assert output =~ "How do you want to provide context?"
+    assert output =~ "One chat stays open until you choose Start over or Exit."
+    assert output =~ "Follow-up questions reuse the same context and recent answers."
     assert output =~ "Paste your context below."
     assert output =~ "Type /done on its own line, then press Enter."
+    assert output =~ "Blank lines are kept as part of the context."
+    assert output =~ "Run summary"
     assert output =~ "Answer:"
     assert output =~ "example answer"
     assert output =~ "Status: completed"
-    assert output =~ "Tokens: 22"
+    assert output =~ "Total tokens: 22"
+    assert output =~ "Top-level steps: 1"
+    assert output =~ "Timeline steps: 1 (includes delegated work)"
   end
 
   test "interactive mode explains Ctrl+D paste termination and exits cleanly" do
@@ -116,6 +122,7 @@ defmodule RlmMinimalEx.CLITest do
 
     assert output =~ "Paste your context below."
     assert output =~ "Type /done on its own line, then press Enter."
+    assert output =~ "Blank lines are kept as part of the context."
     assert output =~ "Paste ended with Ctrl+D."
     assert output =~ "finish paste with `/done`"
     refute output =~ "What do you want to ask?"
@@ -229,6 +236,24 @@ defmodule RlmMinimalEx.CLITest do
            ]
   end
 
+  test "interactive mode explains what the post-run menu actions do" do
+    run_fun = fn _context, query, _opts ->
+      {:ok, "done", completed_run(query, "done", tokens: 33)}
+    end
+
+    {io, get_output} =
+      scripted_io(gets: ["1\n", "context\n", "/done\n", "show me the trace\n", "4\n"])
+
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
+
+    output = get_output.()
+
+    assert output =~ "What next in this chat?"
+    assert output =~ "Keeps the same context and recent answers."
+    assert output =~ "Shows tool calls, delegated work, and assistant text for this run."
+    assert output =~ "Clears this chat and loads new context."
+  end
+
   test "interactive mode shows timeline on demand" do
     run_fun = fn _context, query, _opts ->
       {:ok, "done", completed_run(query, "done", tokens: 33)}
@@ -263,6 +288,8 @@ defmodule RlmMinimalEx.CLITest do
 
     assert output =~ "Run failed:"
     assert output =~ ":missing_api_key"
-    assert output =~ "What next?"
+    assert output =~ "What next in this chat?"
+    assert output =~ "Keeps the same context and prior successful answers."
+    assert output =~ "Clears this chat and loads new context."
   end
 end
