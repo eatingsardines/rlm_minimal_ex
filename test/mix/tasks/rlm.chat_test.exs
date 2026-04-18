@@ -66,5 +66,6 @@ defmodule Mix.Tasks.Rlm.ChatTest do
     assert output =~ "mix rlm.chat"
     assert output =~ "--file"
     assert output =~ "--model"
+    refute_receive {:cli_started, _opts}
   end
 end

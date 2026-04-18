@@ -1,6 +1,8 @@
 defmodule Mix.Tasks.Rlm.Chat do
   use Mix.Task
 
+  alias RlmMinimalEx.Env
+
   @shortdoc "Starts the interactive RlmMinimalEx terminal interface"
 
   @moduledoc """
@@ -31,13 +33,14 @@ defmodule Mix.Tasks.Rlm.Chat do
 
   @impl Mix.Task
   def run(args) do
-    Mix.Task.run("app.start")
-
     {opts, rest, _invalid} = OptionParser.parse(args, strict: @switches)
 
     if opts[:help] do
       Mix.shell().info(@moduledoc)
     else
+      Env.load_dotenv()
+      Mix.Task.run("app.start")
+
       cli_module = Application.get_env(:rlm_minimal_ex, :cli_module, RlmMinimalEx.CLI)
 
       cli_opts =

@@ -170,42 +170,24 @@ defmodule RlmMinimalEx.SessionTest do
 
   test "defaults to gpt-5.4-nano when no override is configured", %{env: env} do
     original_env_model = System.get_env("RLM_MINIMAL_EX_MODEL")
-    original_app_model = Application.get_env(:rlm_minimal_ex, :default_model)
-    original_cwd = File.cwd!()
-
-    tmp_dir =
-      Path.join(System.tmp_dir!(), "rlm_minimal_ex_session_test_#{System.unique_integer()}")
-
-    File.mkdir_p!(tmp_dir)
 
     try do
       System.delete_env("RLM_MINIMAL_EX_MODEL")
-      Application.delete_env(:rlm_minimal_ex, :default_model)
 
-      File.cd!(tmp_dir, fn ->
-        {:ok, session} =
-          Session.start_link(
-            env_pid: env,
-            model_fn: text_model("The answer is 42."),
-            max_turns: 5
-          )
+      {:ok, session} =
+        Session.start_link(
+          env_pid: env,
+          model_fn: text_model("The answer is 42."),
+          max_turns: 5
+        )
 
-        state = :sys.get_state(session)
-        assert state.model_name == "gpt-5.4-nano"
-      end)
+      state = :sys.get_state(session)
+      assert state.model_name == "gpt-5.4-nano"
     after
-      File.cd!(original_cwd)
-
       if original_env_model do
         System.put_env("RLM_MINIMAL_EX_MODEL", original_env_model)
       else
         System.delete_env("RLM_MINIMAL_EX_MODEL")
-      end
-
-      if original_app_model do
-        Application.put_env(:rlm_minimal_ex, :default_model, original_app_model)
-      else
-        Application.delete_env(:rlm_minimal_ex, :default_model)
       end
     end
   end

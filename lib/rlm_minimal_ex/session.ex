@@ -17,6 +17,8 @@ defmodule RlmMinimalEx.Session do
   alias RlmMinimalEx.{Actions, Environment, Trajectory}
   alias Trajectory.{Action, Run, Step}
 
+  @default_model "gpt-5.4-nano"
+
   defstruct [
     :env_pid,
     :model_name,
@@ -52,7 +54,6 @@ defmodule RlmMinimalEx.Session do
 
   @impl true
   def init(opts) do
-    RlmMinimalEx.Env.load_dotenv()
     env_pid = resolve_env(opts)
 
     state = %__MODULE__{
@@ -60,7 +61,7 @@ defmodule RlmMinimalEx.Session do
       model_name:
         opts[:model] ||
           System.get_env("RLM_MINIMAL_EX_MODEL") ||
-          Application.get_env(:rlm_minimal_ex, :default_model, "gpt-5.4-nano"),
+          @default_model,
       model_fn: opts[:model_fn] || (&RlmMinimalEx.Model.chat/3),
       lane: opts[:lane] || :read_only,
       max_turns: opts[:max_turns] || 8,
@@ -175,8 +176,9 @@ defmodule RlmMinimalEx.Session do
   end
 
   defp execute_tool_calls(calls, state) do
-    Enum.map_reduce(calls, [], fn call, msgs ->
-      action_name = safe_to_atom(call.name)
+    calls
+    |> Enum.reduce({[], []}, fn call, {actions, msgs} ->
+      action_name = normalize_action_name(call.name)
       action_start = System.monotonic_time(:millisecond)
 
       {result, executor, child_run} = dispatch_action(action_name, call.arguments, state)
@@ -204,8 +206,9 @@ defmodule RlmMinimalEx.Session do
         "content" => content
       }
 
-      {action_entry, msgs ++ [tool_msg]}
+      {[action_entry | actions], [tool_msg | msgs]}
     end)
+    |> then(fn {actions, msgs} -> {Enum.reverse(actions), Enum.reverse(msgs)} end)
   end
 
   defp child_runs(actions) do
@@ -227,28 +230,21 @@ defmodule RlmMinimalEx.Session do
 
   defp do_delegate(params, state) do
     task = params["task"]
-    context_var = params["context_var"]
-
-    context =
-      if context_var do
-        Environment.get_var(state.env_pid, context_var)
-      else
-        Environment.get_var(state.env_pid, "context")
-      end
+    context_name = params["context_var"] || "context"
 
     worker_opts = [
       model: state.model_name,
       model_fn: state.model_fn,
       lane: state.lane,
       max_turns: state.max_turns,
-      system_prompt: worker_system_prompt()
+      system_prompt: worker_system_prompt(),
+      context_source: {:env_var, state.env_pid, context_name}
     ]
 
     worker_fn = fn ->
-      case RlmMinimalEx.run(context, task, worker_opts) do
+      case RlmMinimalEx.run(nil, task, worker_opts) do
         {:ok, answer, run} -> {{:ok, answer}, run}
         {:error, reason, run} -> {{:error, "Delegation failed: #{inspect(reason)}"}, run}
-        {:error, reason} -> {{:error, "Delegation failed: #{inspect(reason)}"}, nil}
       end
     end
 
@@ -261,12 +257,13 @@ defmodule RlmMinimalEx.Session do
     end
   end
 
-  defp safe_to_atom(name) when is_atom(name), do: name
+  defp normalize_action_name(name) when is_atom(name), do: name
 
-  defp safe_to_atom(name) when is_binary(name) do
-    String.to_existing_atom(name)
-  rescue
-    ArgumentError -> name
+  defp normalize_action_name(name) when is_binary(name) do
+    case Actions.get(name) do
+      %{name: action_name} -> action_name
+      nil -> name
+    end
   end
 
   defp default_system_prompt do

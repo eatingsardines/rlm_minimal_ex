@@ -121,7 +121,7 @@ defmodule RlmMinimalEx.CLITest do
     refute output =~ "What do you want to ask?"
   end
 
-  test "interactive mode can treat unexpected first input as pasted context" do
+  test "interactive mode can treat obvious pasted text at the menu as context" do
     parent = self()
 
     run_fun = fn context, query, opts ->
@@ -132,7 +132,7 @@ defmodule RlmMinimalEx.CLITest do
     {io, _get_output} =
       scripted_io(
         gets: [
-          "first context line\n",
+          "Property-based testing is highly effective for verifying algorithms.\n",
           "second context line\n",
           "/done\n",
           "what matters?\n",
@@ -142,7 +142,36 @@ defmodule RlmMinimalEx.CLITest do
 
     assert :ok = CLI.start(run_fun: run_fun, io: io)
 
-    assert_receive {:run_called, "first context line\nsecond context line\n", "what matters?", []}
+    assert_receive {:run_called,
+                    "Property-based testing is highly effective for verifying algorithms.\nsecond context line\n",
+                    "what matters?", []}
+  end
+
+  test "interactive mode rejects ambiguous short menu input" do
+    {io, get_output} =
+      scripted_io(
+        gets: [
+          "wat\n",
+          "1\n",
+          "context\n",
+          "/done\n",
+          "what now?\n",
+          "4\n"
+        ]
+      )
+
+    assert :ok =
+             CLI.start(
+               io: io,
+               run_fun: fn _context, query, _opts ->
+                 {:ok, "done", completed_run(query, "done")}
+               end
+             )
+
+    output = get_output.()
+
+    assert output =~ "Please enter 1 or 2."
+    assert output =~ "What do you want to ask?"
   end
 
   test "interactive mode can load context from file" do

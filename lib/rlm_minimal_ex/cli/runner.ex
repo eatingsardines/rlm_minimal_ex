@@ -72,7 +72,7 @@ defmodule RlmMinimalEx.CLI.Runner do
     run_fun = opts[:run_fun] || (&RlmMinimalEx.run/3)
     run_opts = opts[:run_opts] || []
 
-    case run_fun.(state.context, query, run_opts) do
+    case normalize_run_result(query, run_fun.(state.context, query, run_opts)) do
       {:ok, answer, run} ->
         print_success(answer, run, opts)
         post_run_menu(%{state | last_answer: answer, last_run: run}, opts)
@@ -80,10 +80,6 @@ defmodule RlmMinimalEx.CLI.Runner do
       {:error, reason, run} ->
         print_error(reason, run, opts)
         post_error_menu(%{state | last_run: run}, opts)
-
-      {:error, reason} ->
-        print_error(reason, nil, opts)
-        post_error_menu(state, opts)
     end
   end
 
@@ -126,10 +122,16 @@ defmodule RlmMinimalEx.CLI.Runner do
       nil ->
         :halt
 
-      # Treat unexpected input as the first pasted line so users who paste too
-      # early do not get trapped in a validation loop.
       first_line ->
-        with_pasted_context(opts, first_line <> "\n")
+        if likely_pasted_context_start?(first_line) do
+          say(opts, "Treating that input as pasted context.")
+          blank(opts)
+          with_pasted_context(opts, first_line <> "\n")
+        else
+          say(opts, "Please enter 1 or 2.")
+          blank(opts)
+          prompt_context_source(opts)
+        end
     end
   end
 
@@ -352,6 +354,18 @@ defmodule RlmMinimalEx.CLI.Runner do
   defp normalize_post_run_choice("start over"), do: "3"
   defp normalize_post_run_choice("exit"), do: "4"
   defp normalize_post_run_choice(choice), do: choice
+
+  defp normalize_run_result(query, {:error, reason}) do
+    {:error, reason, Run.new(query) |> Run.fail()}
+  end
+
+  defp normalize_run_result(_query, result), do: result
+
+  defp likely_pasted_context_start?(input) do
+    String.contains?(input, [" ", "\t"]) ||
+      String.length(input) > 16 ||
+      String.match?(input, ~r/[[:punct:]]/)
+  end
 
   defp format_file_error(:enoent), do: "file not found"
   defp format_file_error(reason), do: :file.format_error(reason) |> to_string()
