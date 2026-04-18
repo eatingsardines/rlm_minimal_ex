@@ -8,6 +8,7 @@ defmodule RlmMinimalEx.MixProject do
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       preferred_cli_env: [check: :test],
+      package: package(),
       deps: deps(),
       aliases: aliases()
     ]
@@ -33,6 +34,12 @@ defmodule RlmMinimalEx.MixProject do
   defp aliases do
     [
       check: ["format --check-formatted", "test", "credo --strict"]
+    ]
+  end
+
+  defp package do
+    [
+      licenses: ["Apache-2.0"]
     ]
   end
 end
