@@ -446,6 +446,44 @@ defmodule RlmMinimalEx.SessionTest do
     assert run.status == :failed
   end
 
+  test "session stays responsive while a turn runs in a supervised task", %{env: env} do
+    parent = self()
+
+    model_fn = fn _model, _messages, _opts ->
+      send(parent, {:model_started, self()})
+
+      receive do
+        :continue ->
+          mc = %ModelCall{
+            model: "test",
+            messages_in: 1,
+            tools_offered: [],
+            tool_calls_made: [],
+            response_type: :text,
+            input_tokens: 10,
+            output_tokens: 5,
+            duration_ms: 1
+          }
+
+          {:ok, :text, "done", mc}
+      end
+    end
+
+    {:ok, session} = Session.start_link(env_pid: env, model_fn: model_fn, max_turns: 5)
+    run_task = Task.async(fn -> Session.run(session, "test") end)
+
+    assert_receive {:model_started, model_pid}
+
+    state = :sys.get_state(session)
+    assert state.in_flight_turn != nil
+    assert state.in_flight_turn.turn == 0
+
+    send(model_pid, :continue)
+
+    assert {:ok, "done", run} = Task.await(run_task)
+    assert run.status == :completed
+  end
+
   test "max turns returns timeout error", %{env: env} do
     {:ok, session} =
       Session.start_link(env_pid: env, model_fn: always_tool_model(), max_turns: 2)

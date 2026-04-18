@@ -1,13 +1,14 @@
 defmodule RlmMinimalEx.RunSupervisor do
   @moduledoc """
-  Per-run supervisor for the core runtime pair.
+  Per-run supervisor for the core runtime tree.
 
   Each run starts:
 
   - one `RlmMinimalEx.Environment`
+  - one per-run `Task.Supervisor`
   - one `RlmMinimalEx.Session`
 
-  The strategy is `:one_for_all`, so the pair behaves as a unit.
+  The strategy is `:one_for_all`, so the run behaves as a unit.
   """
   use Supervisor
 
@@ -26,6 +27,30 @@ defmodule RlmMinimalEx.RunSupervisor do
     |> Supervisor.which_children()
     |> Enum.find_value(fn
       {RlmMinimalEx.Session, pid, :worker, _} -> pid
+      _ -> nil
+    end)
+  end
+
+  @doc """
+  Finds the environment child pid for a run supervisor.
+  """
+  def environment(sup) do
+    sup
+    |> Supervisor.which_children()
+    |> Enum.find_value(fn
+      {RlmMinimalEx.Environment, pid, :worker, _} -> pid
+      _ -> nil
+    end)
+  end
+
+  @doc """
+  Finds the per-run task supervisor pid for a run supervisor.
+  """
+  def task_supervisor(sup) do
+    sup
+    |> Supervisor.which_children()
+    |> Enum.find_value(fn
+      {{Task.Supervisor, _run_id}, pid, _type, [Task.Supervisor]} -> pid
       _ -> nil
     end)
   end
@@ -56,6 +81,12 @@ defmodule RlmMinimalEx.RunSupervisor do
       %{
         id: RlmMinimalEx.Environment,
         start: {RlmMinimalEx.Environment, :start_link, [env_opts]}
+      },
+      %{
+        id: {Task.Supervisor, run_id},
+        start:
+          {Task.Supervisor, :start_link,
+           [[name: {:via, Registry, {RlmMinimalEx.Registry, {:task_sup, run_id}}}]]}
       },
       %{
         id: RlmMinimalEx.Session,

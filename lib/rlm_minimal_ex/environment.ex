@@ -8,7 +8,9 @@ defmodule RlmMinimalEx.Environment do
   """
   use GenServer
 
-  defstruct [:run_id, :ets, :lane, :var_meta]
+  alias RlmMinimalEx.RuntimeTelemetry
+
+  defstruct [:run_id, :ets, :lane, :var_meta, :line_cache]
 
   @doc """
   Starts an environment process for a run.
@@ -37,6 +39,13 @@ defmodule RlmMinimalEx.Environment do
     GenServer.call(pid, {:get_var, name})
   end
 
+  @doc """
+  Returns a compact status snapshot for the live environment process.
+  """
+  def status(pid) do
+    GenServer.call(pid, :status)
+  end
+
   @impl true
   def init(opts) do
     run_id = opts[:run_id] || make_ref()
@@ -55,7 +64,8 @@ defmodule RlmMinimalEx.Environment do
       run_id: run_id,
       ets: table,
       lane: opts[:lane] || :read_only,
-      var_meta: init_var_meta(context, query)
+      var_meta: init_var_meta(context, query),
+      line_cache: init_line_cache(context, query)
     }
 
     {:ok, state}
@@ -63,13 +73,20 @@ defmodule RlmMinimalEx.Environment do
 
   @impl true
   def handle_call({:execute, action_name, params}, _from, state) do
+    action_start = System.monotonic_time(:millisecond)
     {result, state} = do_execute(action_name, params, state)
+    emit_action_telemetry(action_name, result, state, action_start)
     {:reply, result, state}
   end
 
   @impl true
   def handle_call({:get_var, name}, _from, state) do
     {:reply, ets_get(state.ets, name), state}
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    {:reply, environment_status(state), state}
   end
 
   @impl true
@@ -120,14 +137,7 @@ defmodule RlmMinimalEx.Environment do
 
       value when is_binary(value) ->
         sliced = String.slice(value, offset, len)
-        :ets.insert(state.ets, {target, sliced})
-
-        meta =
-          Map.put(state.var_meta, target, %{
-            type: :string,
-            created_at: DateTime.utc_now(),
-            size: byte_size(sliced)
-          })
+        state = put_var(state, target, sliced)
 
         content = """
         Stored '#{target}' (#{String.length(sliced)} chars) from '#{source}'
@@ -135,7 +145,7 @@ defmodule RlmMinimalEx.Environment do
         #{sliced}
         """
 
-        {{:ok, String.trim(content)}, %{state | var_meta: meta}}
+        {{:ok, String.trim(content)}, state}
 
       _other ->
         {{:error, "Variable '#{source}' is not a string"}, state}
@@ -166,9 +176,10 @@ defmodule RlmMinimalEx.Environment do
          {:ok, start_line} <- validate_positive_integer(start_line, "start_line"),
          {:ok, end_line} <- validate_positive_integer(end_line, "end_line"),
          :ok <- validate_line_range(start_line, end_line) do
+      {source_lines, state} = fetch_cached_lines(state, source, value)
+
       lines =
-        value
-        |> String.split("\n")
+        source_lines
         |> Enum.with_index(1)
         |> Enum.filter(fn {_line, number} -> number >= start_line and number <= end_line end)
         |> Enum.map_join("\n", fn {line, number} -> "L#{number}: #{line}" end)
@@ -194,11 +205,11 @@ defmodule RlmMinimalEx.Environment do
         {{:error, "No context loaded"}, state}
 
       context when is_binary(context) ->
+        {context_lines, state} = fetch_cached_lines(state, "context", context)
         query_down = String.downcase(query)
 
         results =
-          context
-          |> String.split("\n")
+          context_lines
           |> Enum.with_index(1)
           |> Enum.filter(fn {line, _i} ->
             String.contains?(String.downcase(line), query_down)
@@ -302,7 +313,11 @@ defmodule RlmMinimalEx.Environment do
         extra_meta
       )
 
-    %{state | var_meta: Map.put(state.var_meta, name, meta)}
+    %{
+      state
+      | var_meta: Map.put(state.var_meta, name, meta),
+        line_cache: update_line_cache(state.line_cache, name, value)
+    }
   end
 
   defp scratchpad_key(name) when is_binary(name) do
@@ -342,6 +357,12 @@ defmodule RlmMinimalEx.Environment do
     |> maybe_put_query_meta(query)
   end
 
+  defp init_line_cache(context, query) do
+    %{}
+    |> maybe_cache_lines("context", context)
+    |> maybe_cache_lines("query", query)
+  end
+
   defp maybe_put_context_meta(meta, nil), do: meta
 
   defp maybe_put_context_meta(meta, context) do
@@ -361,4 +382,70 @@ defmodule RlmMinimalEx.Environment do
       size: byte_size_of(query)
     })
   end
+
+  defp fetch_cached_lines(state, name, value) do
+    case Map.fetch(state.line_cache, name) do
+      {:ok, lines} ->
+        emit_line_cache_telemetry(state, name, :hit)
+        {lines, state}
+
+      :error ->
+        lines = split_lines(value)
+        emit_line_cache_telemetry(state, name, :miss)
+        {lines, %{state | line_cache: Map.put(state.line_cache, name, lines)}}
+    end
+  end
+
+  defp maybe_cache_lines(cache, _name, value) when not is_binary(value), do: cache
+  defp maybe_cache_lines(cache, name, value), do: Map.put(cache, name, split_lines(value))
+
+  defp update_line_cache(cache, name, value) when is_binary(value) do
+    Map.put(cache, name, split_lines(value))
+  end
+
+  defp update_line_cache(cache, name, _value) do
+    Map.delete(cache, name)
+  end
+
+  defp split_lines(value) do
+    String.split(value, "\n")
+  end
+
+  defp environment_status(state) do
+    %{
+      run_id: inspect(state.run_id),
+      lane: state.lane,
+      var_count: map_size(state.var_meta),
+      line_cache_entries: map_size(state.line_cache),
+      vars: state.var_meta |> Map.keys() |> Enum.sort()
+    }
+  end
+
+  defp emit_action_telemetry(action_name, result, state, action_start) do
+    RuntimeTelemetry.execute(
+      [:environment, :action, :stop],
+      %{duration_ms: System.monotonic_time(:millisecond) - action_start},
+      %{
+        action: action_name,
+        lane: state.lane,
+        run_id: inspect(state.run_id),
+        status: result_status(result)
+      }
+    )
+  end
+
+  defp emit_line_cache_telemetry(state, name, status) do
+    RuntimeTelemetry.execute(
+      [:environment, :line_cache],
+      %{count: 1},
+      %{
+        status: status,
+        var: name,
+        run_id: inspect(state.run_id)
+      }
+    )
+  end
+
+  defp result_status({:ok, _content}), do: :ok
+  defp result_status({:error, _reason}), do: :error
 end

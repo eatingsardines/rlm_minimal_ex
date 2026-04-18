@@ -6,7 +6,7 @@ defmodule RlmMinimalEx.Application do
 
   - `RlmMinimalEx.Registry` for per-run process lookup
   - `RlmMinimalEx.ChatSessionSupervisor` for long-lived interactive chat sessions
-  - `RlmMinimalEx.TaskSupervisor` for delegated one-shot worker tasks
+  - `RlmMinimalEx.ChatTaskSupervisor` for chat-scoped one-shot tasks
   - `RlmMinimalEx.RunsSupervisor` for per-run supervision trees
   """
 
@@ -17,7 +17,7 @@ defmodule RlmMinimalEx.Application do
     children = [
       {Registry, keys: :unique, name: RlmMinimalEx.Registry},
       {RlmMinimalEx.ChatSessionSupervisor, []},
-      {Task.Supervisor, name: RlmMinimalEx.TaskSupervisor},
+      {Task.Supervisor, name: RlmMinimalEx.ChatTaskSupervisor},
       {DynamicSupervisor, name: RlmMinimalEx.RunsSupervisor, strategy: :one_for_one}
     ]
 
