@@ -4,13 +4,13 @@ Minimal BEAM-native runtime for recursive LLM work.
 
 This repo includes:
 
-- `RlmMinimalEx.run/3`
-- per-run supervision
-- externalized run state in `Environment`
-- a model turn loop in `Session`
-- typed tool definitions in `Actions`
-- structured run traces in `Trajectory`
-- delegated nested worker sessions via `Task.Supervisor`
+- `RlmMinimalEx.run/3` (the main function you call to start a run)
+- per-run supervision (each run gets its own supervised processes)
+- externalized run state in `Environment` (the big context is stored outside the model prompt)
+- a model turn loop in `Session` (one process keeps asking the model what to do next)
+- typed tool definitions in `Actions` (the available tools are defined in one place)
+- structured run traces in `Trajectory` (the run keeps a structured record of what happened)
+- delegated nested worker sessions via `Task.Supervisor` (a run can start smaller nested runs for subtasks)
 
 ## Quick Start
 
