@@ -19,11 +19,12 @@ defmodule RlmMinimalEx do
           model_fn: (String.t(), list(), keyword() -> RlmMinimalEx.Model.response()),
           lane: :read_only | :workspace,
           max_turns: pos_integer(),
-          system_prompt: String.t()
+          system_prompt: String.t(),
+          context_source: {:env_var, pid(), String.t()}
         ]
 
   @spec run(term(), String.t(), run_opts()) ::
-          {:ok, String.t(), Run.t()} | {:error, term()} | {:error, term(), Run.t()}
+          {:ok, String.t(), Run.t()} | {:error, term(), Run.t()}
   @doc """
   Runs a single session against `query` with `context` stored in the environment.
   """
@@ -35,7 +36,8 @@ defmodule RlmMinimalEx do
       model_fn: opts[:model_fn],
       lane: Keyword.get(opts, :lane, :read_only),
       max_turns: Keyword.get(opts, :max_turns, 8),
-      system_prompt: opts[:system_prompt]
+      system_prompt: opts[:system_prompt],
+      context_source: opts[:context_source]
     ]
 
     case DynamicSupervisor.start_child(
@@ -52,7 +54,7 @@ defmodule RlmMinimalEx do
         end
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, reason, Run.new(query) |> Run.fail()}
     end
   end
 
@@ -64,7 +66,6 @@ defmodule RlmMinimalEx do
     case run(context, query, opts) do
       {:ok, answer, _run} -> answer
       {:error, reason, _run} -> raise "RlmMinimalEx.run! failed: #{inspect(reason)}"
-      {:error, reason} -> raise "RlmMinimalEx.run! failed: #{inspect(reason)}"
     end
   end
 end

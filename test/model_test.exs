@@ -1,6 +1,8 @@
 defmodule RlmMinimalEx.ModelTest do
   use ExUnit.Case, async: false
 
+  alias RlmMinimalEx.Env
+
   defp user_messages do
     [%{"role" => "user", "content" => "hi"}]
   end
@@ -28,21 +30,13 @@ defmodule RlmMinimalEx.ModelTest do
 
   test "returns missing_api_key when no key is configured" do
     original_key = System.get_env("OPENAI_API_KEY")
-    original_cwd = File.cwd!()
-    tmp_dir = Path.join(System.tmp_dir!(), "rlm_minimal_ex_model_test_#{System.unique_integer()}")
-
-    File.mkdir_p!(tmp_dir)
 
     try do
       System.put_env("OPENAI_API_KEY", "your-key-here")
 
-      File.cd!(tmp_dir, fn ->
-        assert {:error, :missing_api_key} =
-                 RlmMinimalEx.Model.chat("gpt-test", user_messages(), api_key: nil)
-      end)
+      assert {:error, :missing_api_key} =
+               RlmMinimalEx.Model.chat("gpt-test", user_messages(), api_key: nil)
     after
-      File.cd!(original_cwd)
-
       if original_key do
         System.put_env("OPENAI_API_KEY", original_key)
       else
@@ -51,9 +45,8 @@ defmodule RlmMinimalEx.ModelTest do
     end
   end
 
-  test "loads api key from .env when shell env is unset" do
+  test "can use an api key loaded explicitly from .env" do
     original_key = System.get_env("OPENAI_API_KEY")
-    original_cwd = File.cwd!()
 
     tmp_dir =
       Path.join(System.tmp_dir!(), "rlm_minimal_ex_dotenv_test_#{System.unique_integer()}")
@@ -77,16 +70,13 @@ defmodule RlmMinimalEx.ModelTest do
 
     try do
       System.delete_env("OPENAI_API_KEY")
+      assert :ok = Env.load_dotenv(Path.join(tmp_dir, ".env"))
 
-      File.cd!(tmp_dir, fn ->
-        assert {:ok, :text, "hello", _model_call} =
-                 RlmMinimalEx.Model.chat("gpt-test", user_messages(), request_fn: request_fn)
-      end)
+      assert {:ok, :text, "hello", _model_call} =
+               RlmMinimalEx.Model.chat("gpt-test", user_messages(), request_fn: request_fn)
 
       assert_receive {:auth_header, {"authorization", "Bearer dotenv-test-key"}}
     after
-      File.cd!(original_cwd)
-
       if original_key do
         System.put_env("OPENAI_API_KEY", original_key)
       else

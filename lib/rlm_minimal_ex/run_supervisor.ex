@@ -37,6 +37,7 @@ defmodule RlmMinimalEx.RunSupervisor do
     env_opts = [
       run_id: run_id,
       context: opts[:context],
+      context_source: opts[:context_source],
       query: opts[:query],
       lane: opts[:lane] || :read_only
     ]

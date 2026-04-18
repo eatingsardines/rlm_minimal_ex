@@ -7,17 +7,10 @@ defmodule RlmMinimalEx.ConfigurationTest do
   setup do
     openai_key = System.get_env("OPENAI_API_KEY")
     model = System.get_env("RLM_MINIMAL_EX_MODEL")
-    default_model = Application.get_env(:rlm_minimal_ex, :default_model)
 
     on_exit(fn ->
       restore_env("OPENAI_API_KEY", openai_key)
       restore_env("RLM_MINIMAL_EX_MODEL", model)
-
-      if default_model == nil do
-        Application.delete_env(:rlm_minimal_ex, :default_model)
-      else
-        Application.put_env(:rlm_minimal_ex, :default_model, default_model)
-      end
     end)
 
     :ok
@@ -66,7 +59,6 @@ defmodule RlmMinimalEx.ConfigurationTest do
 
   test "session defaults to gpt-5.4-nano when no override is configured" do
     System.delete_env("RLM_MINIMAL_EX_MODEL")
-    Application.delete_env(:rlm_minimal_ex, :default_model)
 
     {:ok, env} =
       Environment.start_link(

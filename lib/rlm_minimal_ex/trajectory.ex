@@ -103,8 +103,8 @@ defmodule RlmMinimalEx.Trajectory do
             query: String.t(),
             answer: String.t() | nil,
             status: :running | :completed | :failed | :timeout,
-            root_steps: [Step.t()],
-            steps: [Step.t()],
+            root_steps: [Step.t()] | :queue.queue(Step.t()),
+            steps: [Step.t()] | :queue.queue(Step.t()),
             started_at: DateTime.t(),
             completed_at: DateTime.t() | nil,
             total_tokens: non_neg_integer()
@@ -119,8 +119,8 @@ defmodule RlmMinimalEx.Trajectory do
         query: query,
         answer: nil,
         status: :running,
-        root_steps: [],
-        steps: [],
+        root_steps: :queue.new(),
+        steps: :queue.new(),
         started_at: DateTime.utc_now(),
         completed_at: nil,
         total_tokens: 0
@@ -154,10 +154,12 @@ defmodule RlmMinimalEx.Trajectory do
           acc + child_run.total_tokens
         end)
 
+      timeline_steps = [step | nested_steps]
+
       %{
         run
-        | root_steps: run.root_steps ++ [step],
-          steps: run.steps ++ [step | nested_steps],
+        | root_steps: :queue.in(step, run.root_steps),
+          steps: Enum.reduce(timeline_steps, run.steps, &:queue.in/2),
           total_tokens: run.total_tokens + tokens + nested_tokens
       }
     end
@@ -166,28 +168,36 @@ defmodule RlmMinimalEx.Trajectory do
     Marks the run as completed with the final `answer`.
     """
     def complete(%__MODULE__{} = run, answer) do
-      %{run | answer: answer, status: :completed, completed_at: DateTime.utc_now()}
+      run
+      |> materialize_step_queues()
+      |> Map.merge(%{answer: answer, status: :completed, completed_at: DateTime.utc_now()})
     end
 
     @doc """
     Marks the run as failed.
     """
     def fail(%__MODULE__{} = run) do
-      %{run | status: :failed, completed_at: DateTime.utc_now()}
+      run
+      |> materialize_step_queues()
+      |> Map.merge(%{status: :failed, completed_at: DateTime.utc_now()})
     end
 
     @doc """
     Marks the run as timed out.
     """
     def timeout(%__MODULE__{} = run) do
-      %{run | status: :timeout, completed_at: DateTime.utc_now()}
+      run
+      |> materialize_step_queues()
+      |> Map.merge(%{status: :timeout, completed_at: DateTime.utc_now()})
     end
 
     @doc """
     Returns only nested delegated steps from the flattened timeline.
     """
     def delegate_steps(%__MODULE__{} = run) do
-      Enum.filter(run.steps, fn %Step{path: path} -> nested_step_path?(path) end)
+      run
+      |> ordered_steps()
+      |> Enum.filter(fn %Step{path: path} -> nested_step_path?(path) end)
     end
 
     @doc """
@@ -197,7 +207,7 @@ defmodule RlmMinimalEx.Trajectory do
       header = "Run status=#{run.status} total_tokens=#{run.total_tokens}"
 
       lines =
-        Enum.map(run.steps, fn %Step{} = step ->
+        Enum.map(ordered_steps(run), fn %Step{} = step ->
           indent = String.duplicate("  ", nesting_level(step.path))
           path = Enum.map_join(step.path, ".", &Integer.to_string/1)
           actions = step.actions |> Enum.map_join(", ", &format_action_name/1)
@@ -225,7 +235,7 @@ defmodule RlmMinimalEx.Trajectory do
         end
 
       lines =
-        Enum.flat_map(run.steps, fn %Step{} = step ->
+        Enum.flat_map(ordered_steps(run), fn %Step{} = step ->
           indent = String.duplicate("  ", nesting_level(step.path))
           path = Enum.map_join(step.path, ".", &Integer.to_string/1)
           action_names = Enum.map_join(step.actions, ", ", &format_action_name/1)
@@ -270,10 +280,22 @@ defmodule RlmMinimalEx.Trajectory do
     end
 
     defp flatten_nested_steps(%__MODULE__{} = run, prefix) do
-      Enum.map(run.steps, fn %Step{} = step ->
+      Enum.map(ordered_steps(run), fn %Step{} = step ->
         %{step | path: prefix ++ step.path}
       end)
     end
+
+    defp materialize_step_queues(%__MODULE__{} = run) do
+      %{run | root_steps: ordered_root_steps(run), steps: ordered_steps(run)}
+    end
+
+    defp ordered_root_steps(%__MODULE__{root_steps: root_steps}) when is_list(root_steps),
+      do: root_steps
+
+    defp ordered_root_steps(%__MODULE__{root_steps: root_steps}), do: :queue.to_list(root_steps)
+
+    defp ordered_steps(%__MODULE__{steps: steps}) when is_list(steps), do: steps
+    defp ordered_steps(%__MODULE__{steps: steps}), do: :queue.to_list(steps)
 
     defp format_action_name(%Action{name: name}), do: to_string(name)
 

@@ -6,6 +6,7 @@ defmodule RlmMinimalEx.Model do
   alias RlmMinimalEx.Trajectory.ModelCall
 
   @chat_url "https://api.openai.com/v1/chat/completions"
+  @missing_key_placeholders ["", "your-key-here", "your-openai-key-here"]
 
   @type message :: %{String.t() => String.t()}
   @type tool_call :: %{id: String.t(), name: String.t(), arguments: map()}
@@ -106,13 +107,20 @@ defmodule RlmMinimalEx.Model do
   end
 
   defp parse_tool_calls(tool_calls) do
-    Enum.reduce_while(tool_calls, {:ok, []}, fn tc, {:ok, acc} ->
-      case parse_one_tool_call(tc) do
-        {:ok, parsed} -> {:cont, {:ok, acc ++ [parsed]}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
+    tool_calls
+    |> Enum.reduce_while({:ok, []}, &accumulate_tool_call/2)
+    |> reverse_parsed_tool_calls()
   end
+
+  defp accumulate_tool_call(tc, {:ok, acc}) do
+    case parse_one_tool_call(tc) do
+      {:ok, parsed} -> {:cont, {:ok, [parsed | acc]}}
+      {:error, _} = err -> {:halt, err}
+    end
+  end
+
+  defp reverse_parsed_tool_calls({:ok, parsed}), do: {:ok, Enum.reverse(parsed)}
+  defp reverse_parsed_tool_calls({:error, _} = err), do: err
 
   defp parse_one_tool_call(%{"function" => func} = tc) when is_map(func) do
     args_raw = func["arguments"]
@@ -161,13 +169,10 @@ defmodule RlmMinimalEx.Model do
   defp maybe_add_tools(body, tools), do: Map.put(body, "tools", tools)
 
   defp resolve_api_key(opts) do
-    RlmMinimalEx.Env.load_dotenv()
-
     case Keyword.get(opts, :api_key) ||
-           System.get_env("OPENAI_API_KEY") ||
-           Application.get_env(:rlm_minimal_ex, :openai_api_key) do
+           System.get_env("OPENAI_API_KEY") do
       nil -> {:error, :missing_api_key}
-      key when key in ["", "your-key-here", "your-openai-key-here"] -> {:error, :missing_api_key}
+      key when key in @missing_key_placeholders -> {:error, :missing_api_key}
       key -> {:ok, key}
     end
   end

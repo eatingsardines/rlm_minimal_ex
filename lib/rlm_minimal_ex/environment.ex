@@ -45,7 +45,7 @@ defmodule RlmMinimalEx.Environment do
     # behind the environment boundary while still allowing cheap concurrent reads.
     table = :ets.new(:rlm_minimal_ex_env, [:set, :protected, read_concurrency: true])
 
-    context = opts[:context]
+    context = resolve_context(opts)
     query = opts[:query]
 
     if context, do: :ets.insert(table, {"context", context})
@@ -74,12 +74,8 @@ defmodule RlmMinimalEx.Environment do
 
   @impl true
   def terminate(_reason, state) do
-    if state.ets do
-      try do
-        :ets.delete(state.ets)
-      rescue
-        ArgumentError -> :ok
-      end
+    if state.ets && :ets.info(state.ets) != :undefined do
+      :ets.delete(state.ets)
     end
 
     :ok
@@ -259,6 +255,13 @@ defmodule RlmMinimalEx.Environment do
 
   defp do_execute(action, _params, state) do
     {{:error, "Unknown environment action: #{action}"}, state}
+  end
+
+  defp resolve_context(opts) do
+    case opts[:context_source] do
+      {:env_var, env_pid, name} -> get_var(env_pid, name)
+      nil -> opts[:context]
+    end
   end
 
   defp ets_get(table, key) do

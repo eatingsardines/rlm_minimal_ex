@@ -157,6 +157,9 @@ defmodule RlmMinimalEx.Actions do
     }
   ]
 
+  @actions_by_name Map.new(@actions, &{&1.name, &1})
+  @actions_by_string_name Map.new(@actions, &{Atom.to_string(&1.name), &1})
+
   @doc """
   Returns the full action definition list.
   """
@@ -175,13 +178,11 @@ defmodule RlmMinimalEx.Actions do
   Looks up an action definition by atom or string name.
   """
   def get(name) when is_atom(name) do
-    Enum.find(@actions, &(&1.name == name))
+    Map.get(@actions_by_name, name)
   end
 
   def get(name) when is_binary(name) do
-    get(String.to_existing_atom(name))
-  rescue
-    ArgumentError -> nil
+    Map.get(@actions_by_string_name, name)
   end
 
   defp lane_allowed?(:any, _lane), do: true
