@@ -2,15 +2,10 @@
 
 Minimal BEAM-native runtime for recursive LLM work.
 
-This repo includes:
-
-- `RlmMinimalEx.run/3` to start a run
-- per-run supervision
-- externalized context in `Environment`
-- a model turn loop in `Session`
-- typed tools in `Actions`
-- structured traces in `Trajectory`
-- nested worker sessions via `Task.Supervisor`
+`RlmMinimalEx` is a small OTP runtime for tool using model loops. It keeps
+large context out of the initial prompt, exposes a typed tool surface, supports
+nested worker delegation, records structured run traces, and ships with both an
+interactive CLI and a bundled OpenAI backend.
 
 ## Quick Start
 
@@ -20,92 +15,99 @@ cd rlm_minimal_ex
 mix deps.get
 ```
 
-Edit `.env`:
+For the interactive CLI, set your key in `.env`:
 
 ```dotenv
 OPENAI_API_KEY=your-key-here
 ```
 
-Run tests from your shell:
+Run the project checks:
 
 ```bash
-mix test
+mix check
 ```
 
-One test intentionally crashes a delegated worker. If you see `worker exploded!`
-but the suite still passes, that is expected.
-
-Start the interactive CLI:
+Start the interactive chat:
 
 ```bash
 mix rlm.chat
 ```
 
-The CLI will ask for your context and question.
+You can also preload context from a file:
 
-## Optional: Change the Model
-
-The default model is `gpt-5.4-nano`.
-
-If you want a different model on your machine, add this line to `.env`:
-
-```dotenv
-RLM_MINIMAL_EX_MODEL=your-openai-model
+```bash
+mix rlm.chat --file path/to/context.txt
 ```
 
-## Runtime Shape
+## Using It From Elixir
 
-The root model does not receive the full `context` in its initial prompt.
-Context lives in `Environment` and is inspected through tools.
+Run one query against externalized context:
 
-Each `RlmMinimalEx.run/3` starts one `RlmMinimalEx.Environment` and one
-`RlmMinimalEx.Session`.
+```elixir
+{:ok, answer, run} =
+  RlmMinimalEx.run("""
+  BEAM schedulers run Erlang processes concurrently.
+  """, "What does this say about concurrency?")
+```
 
-The session:
+Use `:workspace` lane when you want normal writes to be available:
 
-1. starts with the system prompt and user query
-2. offers the model the tool surface
-3. executes tool calls
-4. appends tool results to message history
-5. repeats until the model returns plain text
+```elixir
+{:ok, answer, run} =
+  RlmMinimalEx.run(context, query,
+    lane: :workspace,
+    max_turns: 10
+  )
+```
 
-`delegate_subtask` starts a nested run with its own scoped environment and
-session.
+`run!/3` returns only the final answer and raises on failure:
 
-## Runtime Semantics
+```elixir
+answer = RlmMinimalEx.run!(context, query)
+```
 
-- Context is externalized. The model should inspect it with tools before answering.
-- Scratchpad writes are allowed in `:read_only` through `write_scratchpad`.
-- General writes still depend on the current lane and go through `write_var`.
-- Delegated workers inherit the same model function and run their own tool loop.
-- If the run hits max turns, it returns `{:error, :max_turns_exceeded, run}` and sets `run.status` to `:timeout`.
-- Model, action, and token metadata are recorded in the returned trajectory.
+## Runtime Capabilities
 
-## Tool Surface
+At a high level, the runtime provides:
 
-- `read_var` - Read a stored variable and get a short preview of its contents.
-- `write_var` - Store a named variable when the runtime is in `:workspace` mode.
-- `write_scratchpad` - Save intermediate notes under the reserved `scratch:` namespace.
-- `slice_text` - Cut out a substring from a source value and optionally store it as a new variable.
-- `read_text_range` - Read a character range from a stored string variable.
-- `read_lines` - Read an inclusive line range from a stored string variable.
-- `search_context` - Search the externalized context line by line for a query string.
-- `list_vars` - List the variables currently stored in the environment with basic metadata.
-- `describe_var` - Show detailed metadata and a preview for one stored variable.
-- `delegate_subtask` - Start a nested worker run against the full context or one stored variable.
+- externalized run context instead of putting the whole document in the prompt
+- typed tool calls for inspecting and slicing that context
+- nested delegated worker runs for scoped subtasks
+- structured traces describing model calls, tool actions, and final outcomes
+- an interactive CLI with same chat follow-up continuity
+
+## Model Backend
+
+The bundled backend uses OpenAI and reads `OPENAI_API_KEY`.
+
+You can override the model per run or per chat with:
+
+- `RLM_MINIMAL_EX_MODEL`
+- `mix rlm.chat --model ...`
+- `RlmMinimalEx.run(..., model: ...)`
+
+If you want a different backend, the runtime also accepts a custom `model_fn/3`.
 
 ## Return Values
 
 `RlmMinimalEx.run/3` returns one of:
 
 - `{:ok, answer, run}` on success
-- `{:error, reason}` when the run cannot be started
-- `{:error, reason, run}` when the run starts but fails or times out
+- `{:error, reason, run}` on failure or timeout
 
-`run` includes:
+`run` contains the structured trace for that execution, including status, token
+counts, step data, and any nested delegated child runs.
 
-- `status`
-- `total_tokens`
-- `root_steps`
-- `steps`
-- nested child runs on delegated actions
+## Diagnostics
+
+The repo includes a live diagnostics task:
+
+```bash
+mix rlm.diagnostics
+```
+
+This is mainly for inspecting active chats and runs while the app is live.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

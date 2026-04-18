@@ -64,8 +64,12 @@ defmodule Mix.Tasks.Rlm.ChatTest do
       end)
 
     assert output =~ "mix rlm.chat"
+    assert output =~ "path/to/context.txt"
     assert output =~ "--file"
     assert output =~ "--model"
+    assert output =~ "follow-up questions reuse the same context"
+    assert output =~ "paste mode ends with `/done`"
+    assert output =~ "regular writes require `--workspace`"
     refute_receive {:cli_started, _opts}
   end
 end
