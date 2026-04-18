@@ -13,6 +13,7 @@ defmodule RlmMinimalEx.CLI.Runner do
   structure can keep CLI-specific concerns under `lib/rlm_minimal_ex/cli/`.
   """
 
+  alias RlmMinimalEx.ChatSession
   alias RlmMinimalEx.CLI.IO
   alias RlmMinimalEx.Trajectory.Run
 
@@ -36,25 +37,30 @@ defmodule RlmMinimalEx.CLI.Runner do
   """
   @spec start(keyword()) :: :ok
   def start(opts \\ []) do
-    state = %{
-      context: opts[:context],
-      last_answer: nil,
-      last_run: nil
-    }
+    state =
+      %{
+        context: opts[:context],
+        chat_session: nil,
+        last_answer: nil,
+        last_run: nil
+      }
+      |> attach_initial_context(opts)
 
     say(opts, "RlmMinimalEx interactive mode")
     blank(opts)
 
-    loop(state, opts)
+    final_state = loop(state, opts)
+    cleanup_chat_session(final_state)
+    :ok
   end
 
   defp loop(%{context: nil} = state, opts) do
     case prompt_for_context(opts) do
       {:ok, context} ->
-        loop(%{state | context: context}, opts)
+        loop(attach_context(state, context, opts), opts)
 
       :halt ->
-        :ok
+        state
     end
   end
 
@@ -64,15 +70,12 @@ defmodule RlmMinimalEx.CLI.Runner do
         run_query(%{state | context: context}, query, opts)
 
       :halt ->
-        :ok
+        state
     end
   end
 
   defp run_query(state, query, opts) do
-    run_fun = opts[:run_fun] || (&RlmMinimalEx.run/3)
-    run_opts = opts[:run_opts] || []
-
-    case normalize_run_result(query, run_fun.(state.context, query, run_opts)) do
+    case ChatSession.ask(state.chat_session, query) do
       {:ok, answer, run} ->
         print_success(answer, run, opts)
         post_run_menu(%{state | last_answer: answer, last_run: run}, opts)
@@ -265,7 +268,7 @@ defmodule RlmMinimalEx.CLI.Runner do
 
   defp post_run_menu(state, opts) do
     say(opts, "What next?")
-    say(opts, "1. Ask another question about the same context")
+    say(opts, "1. Ask a follow-up in the same chat")
     say(opts, "2. Show the detailed timeline")
     say(opts, "3. Start over with new context")
     say(opts, "4. Exit")
@@ -285,15 +288,15 @@ defmodule RlmMinimalEx.CLI.Runner do
         blank(opts)
 
         loop(
-          %{state | context: nil, last_answer: nil, last_run: nil},
+          reset_chat_state(state),
           Keyword.delete(opts, :file)
         )
 
       "4" ->
-        :ok
+        state
 
       nil ->
-        :ok
+        state
 
       _ ->
         say(opts, "Please enter 1, 2, 3, or 4.")
@@ -304,7 +307,7 @@ defmodule RlmMinimalEx.CLI.Runner do
 
   defp post_error_menu(state, opts) do
     say(opts, "What next?")
-    say(opts, "1. Try another question with the same context")
+    say(opts, "1. Try another question in the same chat")
     say(opts, "2. Start over with new context")
     say(opts, "3. Exit")
 
@@ -321,7 +324,7 @@ defmodule RlmMinimalEx.CLI.Runner do
         blank(opts)
 
         loop(
-          %{state | context: nil, last_answer: nil, last_run: nil},
+          reset_chat_state(state),
           Keyword.delete(opts, :file)
         )
 
@@ -329,18 +332,18 @@ defmodule RlmMinimalEx.CLI.Runner do
         blank(opts)
 
         loop(
-          %{state | context: nil, last_answer: nil, last_run: nil},
+          reset_chat_state(state),
           Keyword.delete(opts, :file)
         )
 
       "3" ->
-        :ok
+        state
 
       "exit" ->
-        :ok
+        state
 
       nil ->
-        :ok
+        state
 
       _ ->
         say(opts, "Please enter 1, 2, or 3.")
@@ -355,17 +358,55 @@ defmodule RlmMinimalEx.CLI.Runner do
   defp normalize_post_run_choice("exit"), do: "4"
   defp normalize_post_run_choice(choice), do: choice
 
-  defp normalize_run_result(query, {:error, reason}) do
-    {:error, reason, Run.new(query) |> Run.fail()}
-  end
-
-  defp normalize_run_result(_query, result), do: result
-
   defp likely_pasted_context_start?(input) do
     String.contains?(input, [" ", "\t"]) ||
       String.length(input) > 16 ||
       String.match?(input, ~r/[[:punct:]]/)
   end
+
+  defp attach_initial_context(%{context: nil} = state, _opts), do: state
+
+  defp attach_initial_context(state, opts) do
+    attach_context(state, state.context, opts)
+  end
+
+  defp attach_context(state, context, opts) do
+    session_pid =
+      case state.chat_session do
+        nil ->
+          {:ok, pid} = ChatSession.start(chat_session_opts(context, opts))
+          pid
+
+        pid ->
+          :ok = ChatSession.update_context(pid, context)
+          pid
+      end
+
+    %{state | context: context, chat_session: session_pid, last_answer: nil, last_run: nil}
+  end
+
+  defp reset_chat_state(state) do
+    cleanup_chat_session(state)
+    %{state | context: nil, chat_session: nil, last_answer: nil, last_run: nil}
+  end
+
+  defp cleanup_chat_session(%{chat_session: nil} = state), do: state
+
+  defp cleanup_chat_session(%{chat_session: pid} = state) when is_pid(pid) do
+    if Process.alive?(pid) do
+      ChatSession.stop(pid)
+    end
+
+    %{state | chat_session: nil}
+  end
+
+  defp chat_session_opts(context, opts) do
+    [context: context, run_opts: opts[:run_opts] || []]
+    |> maybe_put(:run_fun, opts[:run_fun])
+  end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp format_file_error(:enoent), do: "file not found"
   defp format_file_error(reason), do: :file.format_error(reason) |> to_string()

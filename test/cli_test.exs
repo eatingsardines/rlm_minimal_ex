@@ -220,7 +220,13 @@ defmodule RlmMinimalEx.CLITest do
     assert :ok = CLI.start(run_fun: run_fun, io: io)
 
     assert_receive {:run_called, "shared context\n", "first question", []}
-    assert_receive {:run_called, "shared context\n", "second question", []}
+
+    assert_receive {:run_called, "shared context\n", "second question", second_opts}
+
+    assert Keyword.get(second_opts, :conversation_history) == [
+             %{role: :user, content: "first question"},
+             %{role: :assistant, content: "answer for first question"}
+           ]
   end
 
   test "interactive mode shows timeline on demand" do
