@@ -38,7 +38,16 @@ One test intentionally crashes a delegated worker to verify recovery. If you
 see `worker exploded!` in the output but the run ends with all tests passing,
 that is expected.
 
-Start IEx in a separate shell command:
+Start the interactive CLI:
+
+```bash
+mix rlm.chat
+```
+
+The CLI will ask for your context and your question. In paste mode, finish your
+context with a blank line. If your context needs blank lines, use file mode.
+
+Start IEx for manual exploration:
 
 ```bash
 iex -S mix
@@ -99,7 +108,7 @@ instead of a single helper prompt.
 - `describe_var` - Show detailed metadata and a preview for one stored variable.
 - `delegate_subtask` - Start a nested worker run against the full context or one stored variable.
 
-## Smoke Tests
+## Manual IEx Examples
 
 ### 1. Externalized context
 
