@@ -2,6 +2,8 @@ defmodule Mix.Tasks.Rlm.ChatTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
+  alias __MODULE__.CLIStub
+  alias Mix.Tasks.Rlm.Chat
 
   defmodule CLIStub do
     def start(opts) do
@@ -37,7 +39,7 @@ defmodule Mix.Tasks.Rlm.ChatTest do
 
   test "mix rlm.chat delegates to the CLI with parsed options" do
     capture_io(fn ->
-      Mix.Tasks.Rlm.Chat.run([
+      Chat.run([
         "--file",
         "context.txt",
         "--model",
@@ -58,7 +60,7 @@ defmodule Mix.Tasks.Rlm.ChatTest do
   test "mix rlm.chat prints help text" do
     output =
       capture_io(fn ->
-        Mix.Tasks.Rlm.Chat.run(["--help"])
+        Chat.run(["--help"])
       end)
 
     assert output =~ "mix rlm.chat"

@@ -4,13 +4,13 @@ Minimal BEAM-native runtime for recursive LLM work.
 
 This repo includes:
 
-- `RlmMinimalEx.run/3` (the main function you call to start a run)
-- per-run supervision (each run gets its own supervised processes)
-- externalized run state in `Environment` (the big context is stored outside the model prompt)
-- a model turn loop in `Session` (one process keeps asking the model what to do next)
-- typed tool definitions in `Actions` (the available tools are defined in one place)
-- structured run traces in `Trajectory` (the run keeps a structured record of what happened)
-- delegated nested worker sessions via `Task.Supervisor` (a run can start smaller nested runs for subtasks)
+- `RlmMinimalEx.run/3` to start a run
+- per-run supervision
+- externalized context in `Environment`
+- a model turn loop in `Session`
+- typed tools in `Actions`
+- structured traces in `Trajectory`
+- nested worker sessions via `Task.Supervisor`
 
 ## Quick Start
 
@@ -26,17 +26,14 @@ Edit `.env`:
 OPENAI_API_KEY=your-key-here
 ```
 
-Paste your API key and save the file.
-
 Run tests from your shell:
 
 ```bash
 mix test
 ```
 
-One test intentionally crashes a delegated worker to verify recovery. If you
-see `worker exploded!` in the output but the run ends with all tests passing,
-that is expected.
+One test intentionally crashes a delegated worker. If you see `worker exploded!`
+but the suite still passes, that is expected.
 
 Start the interactive CLI:
 
@@ -44,13 +41,7 @@ Start the interactive CLI:
 mix rlm.chat
 ```
 
-The CLI will ask for your context and your question.
-
-Start IEx for manual exploration:
-
-```bash
-iex -S mix
-```
+The CLI will ask for your context and question.
 
 ## Optional: Change the Model
 
@@ -65,25 +56,21 @@ RLM_MINIMAL_EX_MODEL=your-openai-model
 ## Runtime Shape
 
 The root model does not receive the full `context` in its initial prompt.
-Instead, the context is stored in environment-owned state and must be inspected
-through tools.
+Context lives in `Environment` and is inspected through tools.
 
-A single `RlmMinimalEx.run/3` call starts a per-run supervision tree with:
+Each `RlmMinimalEx.run/3` starts one `RlmMinimalEx.Environment` and one
+`RlmMinimalEx.Session`.
 
-- one `RlmMinimalEx.Environment`
-- one `RlmMinimalEx.Session`
+The session:
 
-The session process:
-
-1. starts with only the system prompt and the user query
-2. offers the model a typed tool surface
-3. executes any tool calls against the environment or session
-4. appends tool results back into the message history
+1. starts with the system prompt and user query
+2. offers the model the tool surface
+3. executes tool calls
+4. appends tool results to message history
 5. repeats until the model returns plain text
 
-`delegate_subtask` starts a nested `RlmMinimalEx.run/3` with its own scoped
-environment and session, so delegated work runs as a real nested session
-instead of a single helper prompt.
+`delegate_subtask` starts a nested run with its own scoped environment and
+session.
 
 ## Runtime Semantics
 
@@ -107,69 +94,6 @@ instead of a single helper prompt.
 - `describe_var` - Show detailed metadata and a preview for one stored variable.
 - `delegate_subtask` - Start a nested worker run against the full context or one stored variable.
 
-## Manual IEx Examples
-
-### 1. Externalized context
-
-```elixir
-context = """
-alpha
-sentinel token: ORCHID-9137-DELTA
-omega
-"""
-
-{:ok, answer, run} =
-  RlmMinimalEx.run(
-    context,
-    "What is the sentinel token? Use the tools to inspect the externalized context before answering."
-  )
-```
-
-Useful checks:
-
-```elixir
-answer
-run.status
-RlmMinimalEx.Trajectory.Run.pretty_timeline(run)
-```
-
-### 2. Forced delegated worker run
-
-```elixir
-context =
-  String.duplicate("a", 5_000) <>
-    """
-
-    section: archive
-    sentinel token: ORCHID-9137-DELTA
-    """
-
-{:ok, answer, run} =
-  RlmMinimalEx.run(
-    context,
-    """
-    Find the sentinel token.
-    You must inspect the externalized context first.
-    You must use delegate_subtask exactly once before giving your final answer.
-    Do not answer until the delegated worker has returned.
-    """
-  )
-```
-
-Useful checks:
-
-```elixir
-delegate_action =
-  run.root_steps
-  |> Enum.flat_map(& &1.actions)
-  |> Enum.find(&(&1.name == :delegate_subtask))
-
-delegate_action.result
-delegate_action.child_run.answer
-RlmMinimalEx.Trajectory.Run.delegate_steps(run)
-RlmMinimalEx.Trajectory.Run.pretty_timeline(run)
-```
-
 ## Return Values
 
 `RlmMinimalEx.run/3` returns one of:
@@ -182,6 +106,6 @@ RlmMinimalEx.Trajectory.Run.pretty_timeline(run)
 
 - `status`
 - `total_tokens`
-- `root_steps` for parent-only steps
-- `steps` for the full flattened timeline
+- `root_steps`
+- `steps`
 - nested child runs on delegated actions
