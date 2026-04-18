@@ -5,6 +5,7 @@ defmodule RlmMinimalEx.ChatSession do
   A chat session sits above the existing runtime:
 
   - `RlmMinimalEx.ChatSession` stores conversation history across turns
+  - `RlmMinimalEx.ChatSession` retains a bounded recent run history
   - `RlmMinimalEx.run/3` still executes exactly one runtime run per query
 
   This keeps per-run semantics intact while making follow-up questions such as
@@ -32,10 +33,12 @@ defmodule RlmMinimalEx.ChatSession do
     :in_flight,
     :last_answer,
     :run_fun,
+    dropped_run_count: 0,
     transcript: [],
     runs: [],
     run_opts: [],
-    max_recent_turns: 8
+    max_recent_turns: 8,
+    max_runs: 20
   ]
 
   @type state :: %__MODULE__{
@@ -43,14 +46,19 @@ defmodule RlmMinimalEx.ChatSession do
           in_flight: %{task: Task.t(), from: GenServer.from(), query: String.t()} | nil,
           last_answer: String.t() | nil,
           run_fun: run_fun(),
+          dropped_run_count: non_neg_integer(),
           transcript: [transcript_entry()],
           runs: [Run.t()],
           run_opts: keyword(),
-          max_recent_turns: pos_integer()
+          max_recent_turns: pos_integer(),
+          max_runs: pos_integer()
         }
 
   @doc """
   Starts a chat session under `RlmMinimalEx.ChatSessionSupervisor`.
+
+  Supported options include `:max_recent_turns` for transcript retention and
+  `:max_runs` for bounded recent run retention.
   """
   @spec start(keyword()) :: DynamicSupervisor.on_start_child()
   def start(opts \\ []) do
@@ -90,7 +98,7 @@ defmodule RlmMinimalEx.ChatSession do
   end
 
   @doc """
-  Returns all runs for the chat session in chronological order.
+  Returns the retained recent runs for the chat session in chronological order.
   """
   @spec runs(pid()) :: [Run.t()]
   def runs(pid) do
@@ -140,10 +148,12 @@ defmodule RlmMinimalEx.ChatSession do
       in_flight: nil,
       last_answer: nil,
       run_fun: Keyword.get(opts, :run_fun, &RlmMinimalEx.run/3),
+      dropped_run_count: 0,
       transcript: [],
       runs: [],
       run_opts: Keyword.get(opts, :run_opts, []),
-      max_recent_turns: Keyword.get(opts, :max_recent_turns, 8)
+      max_recent_turns: Keyword.get(opts, :max_recent_turns, 8),
+      max_runs: Keyword.get(opts, :max_runs, 20)
     }
 
     {:ok, state}
@@ -209,7 +219,10 @@ defmodule RlmMinimalEx.ChatSession do
         {:noreply, next_state}
 
       {:error, reason, run} ->
-        next_state = %{state | runs: [run | state.runs]} |> clear_in_flight()
+        next_state =
+          state
+          |> record_run(run)
+          |> clear_in_flight()
 
         GenServer.reply(in_flight.from, {:error, reason, run})
         {:noreply, next_state}
@@ -222,7 +235,11 @@ defmodule RlmMinimalEx.ChatSession do
         %{in_flight: %{task: %Task{ref: ref}, from: from, query: query}} = state
       ) do
     run = Run.new(query) |> Run.fail()
-    next_state = %{state | runs: [run | state.runs]} |> clear_in_flight()
+
+    next_state =
+      state
+      |> record_run(run)
+      |> clear_in_flight()
 
     GenServer.reply(from, {:error, {:task_exit, reason}, run})
     {:noreply, next_state}
@@ -261,20 +278,30 @@ defmodule RlmMinimalEx.ChatSession do
       ]
       |> Enum.take(max_messages)
 
-    %{
-      state
-      | transcript: transcript,
-        runs: [run | state.runs],
-        last_answer: answer
-    }
+    state
+    |> Map.put(:transcript, transcript)
+    |> Map.put(:last_answer, answer)
+    |> record_run(run)
   end
 
   defp reset_conversation(state) do
-    %{state | transcript: [], runs: [], last_answer: nil}
+    %{state | transcript: [], runs: [], last_answer: nil, dropped_run_count: 0}
   end
 
   defp clear_in_flight(state) do
     %{state | in_flight: nil}
+  end
+
+  defp record_run(state, run) do
+    runs = [run | state.runs]
+    retained_runs = Enum.take(runs, state.max_runs)
+    dropped_count = max(length(runs) - length(retained_runs), 0)
+
+    %{
+      state
+      | runs: retained_runs,
+        dropped_run_count: state.dropped_run_count + dropped_count
+    }
   end
 
   defp chat_status(state) do
@@ -282,7 +309,9 @@ defmodule RlmMinimalEx.ChatSession do
       busy?: state.in_flight != nil,
       in_flight_query: state.in_flight && state.in_flight.query,
       transcript_message_count: length(state.transcript),
+      max_runs: state.max_runs,
       run_count: length(state.runs),
+      dropped_run_count: state.dropped_run_count,
       context_loaded?: not is_nil(state.context),
       last_answer_preview: preview(state.last_answer)
     }
