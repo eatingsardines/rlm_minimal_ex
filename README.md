@@ -2,8 +2,7 @@
 
 Minimal BEAM-native runtime for recursive LLM work.
 
-This repo keeps the minimal runtime plus a few upgrades that make the
-externalized-context workflow easier to use on the BEAM:
+This repo includes:
 
 - `RlmMinimalEx.run/3`
 - per-run supervision
