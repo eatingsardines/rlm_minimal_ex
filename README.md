@@ -28,16 +28,20 @@ OPENAI_API_KEY=your-key-here
 
 Paste your API key and save the file.
 
-Start IEx:
-
-```bash
-iex -S mix
-```
-
-Run tests:
+Run tests from your shell:
 
 ```bash
 mix test
+```
+
+One test intentionally crashes a delegated worker to verify recovery. If you
+see `worker exploded!` in the output but the run ends with all tests passing,
+that is expected.
+
+Start IEx in a separate shell command:
+
+```bash
+iex -S mix
 ```
 
 ## Optional: Change the Model
