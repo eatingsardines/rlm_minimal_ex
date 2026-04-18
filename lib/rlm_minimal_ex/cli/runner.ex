@@ -239,7 +239,7 @@ defmodule RlmMinimalEx.CLI.Runner do
         prompt_query(opts)
 
       query ->
-        {:ok, query}
+        {:ok, maybe_collect_multiline_query(opts, query)}
     end
   end
 
@@ -358,10 +358,44 @@ defmodule RlmMinimalEx.CLI.Runner do
   defp normalize_post_error_choice("exit"), do: "3"
   defp normalize_post_error_choice(choice), do: choice
 
+  defp maybe_collect_multiline_query(opts, query) do
+    if likely_multiline_query_start?(query) do
+      case read_immediate_query_continuation(opts, []) do
+        [] -> query
+        continuation -> query <> "\n" <> Enum.join(continuation, "")
+      end
+    else
+      query
+    end
+  end
+
+  defp read_immediate_query_continuation(opts, acc) do
+    case IO.gets_nowait(io(opts), "", 10) do
+      nil ->
+        Enum.reverse(acc)
+
+      :eof ->
+        Enum.reverse(acc)
+
+      line ->
+        if String.trim(line) == "/done" do
+          Enum.reverse(acc)
+        else
+          read_immediate_query_continuation(opts, [line | acc])
+        end
+    end
+  end
+
   defp likely_pasted_context_start?(input) do
     String.contains?(input, [" ", "\t"]) ||
       String.length(input) > 16 ||
       String.match?(input, ~r/[[:punct:]]/)
+  end
+
+  defp likely_multiline_query_start?(input) do
+    String.length(input) >= 80 ||
+      String.contains?(input, ":") ||
+      String.starts_with?(input, ["- ", "* ", "1. ", "2. "])
   end
 
   defp attach_initial_context(%{context: nil} = state, _opts), do: state

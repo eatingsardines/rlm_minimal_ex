@@ -36,6 +36,7 @@ defmodule RlmMinimalEx.CLITest do
       Agent.start_link(fn ->
         %{
           gets: Keyword.get(opts, :gets, []),
+          gets_nowait: Keyword.get(opts, :gets_nowait, []),
           puts: []
         }
       end)
@@ -49,6 +50,12 @@ defmodule RlmMinimalEx.CLITest do
       gets: fn _prompt ->
         Agent.get_and_update(agent, fn
           %{gets: [next | rest]} = state -> {next, %{state | gets: rest}}
+          state -> {nil, state}
+        end)
+      end,
+      gets_nowait: fn _prompt, _timeout_ms ->
+        Agent.get_and_update(agent, fn
+          %{gets_nowait: [next | rest]} = state -> {next, %{state | gets_nowait: rest}}
           state -> {nil, state}
         end)
       end
@@ -291,5 +298,48 @@ defmodule RlmMinimalEx.CLITest do
     assert output =~ "What next in this chat?"
     assert output =~ "Keeps the same context and prior successful answers."
     assert output =~ "Clears this chat and loads new context."
+  end
+
+  test "interactive mode absorbs immediately buffered multiline question paste" do
+    parent = self()
+
+    run_fun = fn context, query, opts ->
+      send(parent, {:run_called, context, query, opts})
+      {:error, :max_turns_exceeded}
+    end
+
+    {io, get_output} =
+      scripted_io(
+        gets: [
+          "2\n",
+          "/Users/jarvis/Documents/RLM_ex/source_material/THE_BEAM_BOOK_FULL.md\n",
+          "which parts of the book do you think are related to this: Three parallel sub-agent passes changed the shape of this a bit.\n",
+          "3\n"
+        ],
+        gets_nowait: [
+          "The deeper answer is that the old writeup mixed together two different notions of parity.\n",
+          "\n",
+          "It has the RLM architecture.\n"
+        ]
+      )
+
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
+
+    assert_receive {:run_called, _context, query, []}
+
+    assert query ==
+             "which parts of the book do you think are related to this: Three parallel sub-agent passes changed the shape of this a bit.\n" <>
+               "The deeper answer is that the old writeup mixed together two different notions of parity.\n" <>
+               "\n" <>
+               "It has the RLM architecture.\n"
+
+    output = get_output.()
+
+    assert output =~ "Run failed:"
+    assert output =~ ":max_turns_exceeded"
+    assert output =~ "What next in this chat?"
+
+    refute output =~
+             "Please enter 1, 2, or 3.\n\nWhat next in this chat?\n1. Try another question in the same chat"
   end
 end
