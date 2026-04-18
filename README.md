@@ -2,8 +2,8 @@
 
 Minimal BEAM-native runtime for recursive LLM work.
 
-This repo keeps the minimal runtime kernel plus the parity upgrades that make
-the externalized-context workflow practical on the BEAM:
+This repo keeps the minimal runtime plus a few upgrades that make the
+externalized-context workflow easier to use on the BEAM:
 
 - `RlmMinimalEx.run/3`
 - per-run supervision
@@ -62,7 +62,7 @@ A single `RlmMinimalEx.run/3` call starts a per-run supervision tree with:
 - one `RlmMinimalEx.Environment`
 - one `RlmMinimalEx.Session`
 
-The coordinator session:
+The session process:
 
 1. starts with only the system prompt and the user query
 2. offers the model a typed tool surface
@@ -71,16 +71,16 @@ The coordinator session:
 5. repeats until the model returns plain text
 
 `delegate_subtask` starts a nested `RlmMinimalEx.run/3` with its own scoped
-environment and session, so delegated work is real recursive runtime behavior
-rather than a one-shot prompt wrapper.
+environment and session, so delegated work runs as a real nested session
+instead of a single helper prompt.
 
 ## Runtime Semantics
 
 - Context is externalized. The model should inspect it with tools before answering.
 - Scratchpad writes are allowed in `:read_only` through `write_scratchpad`.
-- General writes remain lane-gated through `write_var`.
-- Delegated workers inherit the runtime model function and run their own tool loop.
-- Max-turn exhaustion is explicit: the runtime returns `{:error, :max_turns_exceeded, run}` and sets `run.status` to `:timeout`.
+- General writes still depend on the current lane and go through `write_var`.
+- Delegated workers inherit the same model function and run their own tool loop.
+- If the run hits max turns, it returns `{:error, :max_turns_exceeded, run}` and sets `run.status` to `:timeout`.
 - Model, action, and token metadata are recorded in the returned trajectory.
 
 ## Tool Surface
@@ -94,7 +94,7 @@ rather than a one-shot prompt wrapper.
 - `search_context` - Search the externalized context line by line for a query string.
 - `list_vars` - List the variables currently stored in the environment with basic metadata.
 - `describe_var` - Show detailed metadata and a preview for one stored variable.
-- `delegate_subtask` - Start a nested worker run against the full context or a scoped variable.
+- `delegate_subtask` - Start a nested worker run against the full context or one stored variable.
 
 ## Smoke Tests
 
@@ -172,5 +172,5 @@ RlmMinimalEx.Trajectory.Run.pretty_timeline(run)
 - `status`
 - `total_tokens`
 - `root_steps` for parent-only steps
-- `steps` for the flattened recursive timeline
+- `steps` for the full flattened timeline
 - nested child runs on delegated actions
