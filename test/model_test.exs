@@ -27,8 +27,72 @@ defmodule RlmMinimalEx.ModelTest do
   end
 
   test "returns missing_api_key when no key is configured" do
-    assert {:error, :missing_api_key} =
-             RlmMinimalEx.Model.chat("gpt-test", user_messages(), api_key: nil)
+    original_key = System.get_env("OPENAI_API_KEY")
+    original_cwd = File.cwd!()
+    tmp_dir = Path.join(System.tmp_dir!(), "rlm_minimal_ex_model_test_#{System.unique_integer()}")
+
+    File.mkdir_p!(tmp_dir)
+
+    try do
+      System.put_env("OPENAI_API_KEY", "your-key-here")
+
+      File.cd!(tmp_dir, fn ->
+        assert {:error, :missing_api_key} =
+                 RlmMinimalEx.Model.chat("gpt-test", user_messages(), api_key: nil)
+      end)
+    after
+      File.cd!(original_cwd)
+
+      if original_key do
+        System.put_env("OPENAI_API_KEY", original_key)
+      else
+        System.delete_env("OPENAI_API_KEY")
+      end
+    end
+  end
+
+  test "loads api key from .env when shell env is unset" do
+    original_key = System.get_env("OPENAI_API_KEY")
+    original_cwd = File.cwd!()
+
+    tmp_dir =
+      Path.join(System.tmp_dir!(), "rlm_minimal_ex_dotenv_test_#{System.unique_integer()}")
+
+    File.mkdir_p!(tmp_dir)
+    File.write!(Path.join(tmp_dir, ".env"), "OPENAI_API_KEY=dotenv-test-key\n")
+
+    request_fn = fn _url, opts ->
+      auth_header = Enum.find(opts[:headers], fn {name, _value} -> name == "authorization" end)
+      send(self(), {:auth_header, auth_header})
+
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "choices" => [%{"message" => %{"content" => "hello"}}],
+           "usage" => %{"prompt_tokens" => 12, "completion_tokens" => 4}
+         }
+       }}
+    end
+
+    try do
+      System.delete_env("OPENAI_API_KEY")
+
+      File.cd!(tmp_dir, fn ->
+        assert {:ok, :text, "hello", _model_call} =
+                 RlmMinimalEx.Model.chat("gpt-test", user_messages(), request_fn: request_fn)
+      end)
+
+      assert_receive {:auth_header, {"authorization", "Bearer dotenv-test-key"}}
+    after
+      File.cd!(original_cwd)
+
+      if original_key do
+        System.put_env("OPENAI_API_KEY", original_key)
+      else
+        System.delete_env("OPENAI_API_KEY")
+      end
+    end
   end
 
   test "returns text responses with model call metadata" do

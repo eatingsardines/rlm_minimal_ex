@@ -13,6 +13,8 @@ defmodule RlmMinimalEx.Application do
 
   @impl true
   def start(_type, _args) do
+    RlmMinimalEx.Env.load_dotenv()
+
     children = [
       {Registry, keys: :unique, name: RlmMinimalEx.Registry},
       {Task.Supervisor, name: RlmMinimalEx.TaskSupervisor},
