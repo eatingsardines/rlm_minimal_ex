@@ -19,6 +19,8 @@ defmodule RlmMinimalEx.Session do
   alias Trajectory.{Action, Run, Step}
 
   @default_model "gpt-5.4-nano"
+  @default_max_delegate_depth 1
+  @default_max_delegate_count 4
 
   defstruct [
     :env_pid,
@@ -33,6 +35,10 @@ defmodule RlmMinimalEx.Session do
     :reply_to,
     :system_prompt,
     :conversation_history,
+    :delegate_depth,
+    :delegate_count,
+    :max_delegate_depth,
+    :max_delegate_count,
     :in_flight_turn
   ]
 
@@ -63,30 +69,21 @@ defmodule RlmMinimalEx.Session do
     GenServer.call(pid, :status)
   end
 
+  @doc """
+  Returns the default maximum nested delegation depth for a run tree.
+  """
+  def default_max_delegate_depth, do: @default_max_delegate_depth
+
+  @doc """
+  Returns the default maximum number of delegated workers across a run tree.
+  """
+  def default_max_delegate_count, do: @default_max_delegate_count
+
   @impl true
   def init(opts) do
     env_pid = resolve_env(opts)
     task_supervisor = resolve_task_supervisor(opts)
-
-    state = %__MODULE__{
-      env_pid: env_pid,
-      task_supervisor: task_supervisor,
-      model_name:
-        opts[:model] ||
-          System.get_env("RLM_MINIMAL_EX_MODEL") ||
-          @default_model,
-      model_fn: opts[:model_fn] || (&RlmMinimalEx.Model.chat/3),
-      lane: opts[:lane] || :read_only,
-      max_turns: opts[:max_turns] || 8,
-      messages: [],
-      run: nil,
-      reply_to: nil,
-      system_prompt: opts[:system_prompt] || default_system_prompt(),
-      conversation_history: opts[:conversation_history] || [],
-      in_flight_turn: nil
-    }
-
-    {:ok, state}
+    {:ok, build_state(opts, env_pid, task_supervisor)}
   end
 
   @impl true
@@ -158,7 +155,8 @@ defmodule RlmMinimalEx.Session do
         GenServer.reply(state.reply_to, {:ok, content, run})
         {:noreply, %{state | run: run}}
 
-      {:tool_calls, calls, model_call, action_entries, tool_messages, child_runs, duration_ms} ->
+      {:tool_calls, calls, model_call, action_entries, tool_messages, child_runs,
+       next_delegate_count, duration_ms} ->
         step = %Step{
           path: [turn],
           turn: turn,
@@ -189,7 +187,7 @@ defmodule RlmMinimalEx.Session do
         run = Run.add_step(state.run, step, child_runs)
 
         send(self(), {:do_turn, turn + 1})
-        {:noreply, %{state | messages: messages, run: run}}
+        {:noreply, %{state | messages: messages, run: run, delegate_count: next_delegate_count}}
 
       {:error, reason} ->
         run = Run.fail(state.run)
@@ -231,6 +229,33 @@ defmodule RlmMinimalEx.Session do
     end
   end
 
+  defp build_state(opts, env_pid, task_supervisor) do
+    %__MODULE__{
+      env_pid: env_pid,
+      task_supervisor: task_supervisor,
+      model_name: model_name_from_opts(opts),
+      model_fn: opts[:model_fn] || (&RlmMinimalEx.Model.chat/3),
+      lane: opts[:lane] || :read_only,
+      max_turns: opts[:max_turns] || 8,
+      messages: [],
+      run: nil,
+      reply_to: nil,
+      system_prompt: opts[:system_prompt] || default_system_prompt(),
+      conversation_history: opts[:conversation_history] || [],
+      delegate_depth: opts[:delegate_depth] || 0,
+      delegate_count: opts[:delegate_count] || 0,
+      max_delegate_depth: opts[:max_delegate_depth] || @default_max_delegate_depth,
+      max_delegate_count: opts[:max_delegate_count] || @default_max_delegate_count,
+      in_flight_turn: nil
+    }
+  end
+
+  defp model_name_from_opts(opts) do
+    opts[:model] ||
+      System.get_env("RLM_MINIMAL_EX_MODEL") ||
+      @default_model
+  end
+
   defp execute_turn(_turn, state) do
     tools = Actions.to_tool_definitions(state.lane)
     turn_start = System.monotonic_time(:millisecond)
@@ -242,12 +267,13 @@ defmodule RlmMinimalEx.Session do
         {:text, content, model_call, duration_ms}
 
       {:ok, :tool_calls, calls, model_call} ->
-        {action_entries, tool_messages} = execute_tool_calls(calls, state)
+        {action_entries, tool_messages, next_delegate_count} = execute_tool_calls(calls, state)
         child_runs = child_runs(action_entries)
         duration_ms = elapsed_ms(turn_start)
         emit_model_call_telemetry(model_call, state, duration_ms, :ok)
 
-        {:tool_calls, calls, model_call, action_entries, tool_messages, child_runs, duration_ms}
+        {:tool_calls, calls, model_call, action_entries, tool_messages, child_runs,
+         next_delegate_count, duration_ms}
 
       {:error, reason} ->
         emit_model_error_telemetry(state, tools, turn_start, reason)
@@ -300,11 +326,15 @@ defmodule RlmMinimalEx.Session do
 
   defp execute_tool_calls(calls, state) do
     calls
-    |> Enum.reduce({[], []}, fn call, {actions, msgs} ->
+    |> Enum.reduce({[], [], state.delegate_count}, fn call, {actions, msgs, delegate_count} ->
       action_name = normalize_action_name(call.name)
       action_start = System.monotonic_time(:millisecond)
 
-      {result, executor, child_run} = dispatch_action(action_name, call.arguments, state)
+      action_state = %{state | delegate_count: delegate_count}
+
+      {result, executor, child_run, next_delegate_count} =
+        dispatch_action(action_name, call.arguments, action_state)
+
       duration = System.monotonic_time(:millisecond) - action_start
 
       content =
@@ -329,9 +359,11 @@ defmodule RlmMinimalEx.Session do
         "content" => content
       }
 
-      {[action_entry | actions], [tool_msg | msgs]}
+      {[action_entry | actions], [tool_msg | msgs], next_delegate_count}
     end)
-    |> then(fn {actions, msgs} -> {Enum.reverse(actions), Enum.reverse(msgs)} end)
+    |> then(fn {actions, msgs, delegate_count} ->
+      {Enum.reverse(actions), Enum.reverse(msgs), delegate_count}
+    end)
   end
 
   defp child_runs(actions) do
@@ -342,13 +374,13 @@ defmodule RlmMinimalEx.Session do
   end
 
   defp dispatch_action(:delegate_subtask, params, state) do
-    {result, child_run} = do_delegate(params, state)
-    {result, :session, child_run}
+    {result, child_run, next_delegate_count} = do_delegate(params, state)
+    {result, :session, child_run, next_delegate_count}
   end
 
   defp dispatch_action(action_name, params, state) do
     result = Environment.execute(state.env_pid, action_name, params)
-    {result, :environment, nil}
+    {result, :environment, nil, state.delegate_count}
   end
 
   defp do_delegate(params, state) do
@@ -356,39 +388,79 @@ defmodule RlmMinimalEx.Session do
     context_name = params["context_var"] || "context"
     delegate_start = System.monotonic_time(:millisecond)
 
-    worker_opts = [
+    case validate_delegate_budget(state) do
+      :ok ->
+        delegate_result = run_delegate_task(task, context_name, state)
+        emit_delegate_telemetry(delegate_result, context_name, delegate_start)
+        finalize_delegate_result(delegate_result, state.delegate_count + 1)
+
+      {:error, reason} ->
+        delegate_result = {{:error, reason}, nil}
+        emit_delegate_telemetry(delegate_result, context_name, delegate_start)
+        finalize_delegate_result(delegate_result, state.delegate_count)
+    end
+  end
+
+  defp run_delegate_task(task, context_name, state) do
+    worker_opts = worker_opts(state, context_name)
+
+    task_ref =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        run_worker_task(task, worker_opts)
+      end)
+
+    case Task.yield(task_ref, :timer.minutes(2)) || Task.shutdown(task_ref) do
+      {:ok, {result, child_run}} -> {result, child_run}
+      {:exit, reason} -> {{:error, "Worker crashed: #{inspect(reason)}"}, nil}
+      nil -> {{:error, "Worker timed out"}, nil}
+    end
+  end
+
+  defp worker_opts(state, context_name) do
+    [
       model: state.model_name,
       model_fn: state.model_fn,
       lane: state.lane,
       max_turns: state.max_turns,
       system_prompt: worker_system_prompt(),
-      context_source: {:env_var, state.env_pid, context_name}
+      context_source: {:env_var, state.env_pid, context_name},
+      delegate_depth: state.delegate_depth + 1,
+      delegate_count: state.delegate_count + 1,
+      max_delegate_depth: state.max_delegate_depth,
+      max_delegate_count: state.max_delegate_count
     ]
+  end
 
-    worker_fn = fn ->
-      case RlmMinimalEx.run(nil, task, worker_opts) do
-        {:ok, answer, run} ->
-          {{:ok, answer}, run}
+  defp run_worker_task(task, worker_opts) do
+    case RlmMinimalEx.run(nil, task, worker_opts) do
+      {:ok, answer, run} ->
+        {{:ok, answer}, run}
 
-        {:error, {:task_exit, reason}, run} ->
-          {{:error, "Worker crashed: #{inspect(reason)}"}, run}
+      {:error, {:task_exit, reason}, run} ->
+        {{:error, "Worker crashed: #{inspect(reason)}"}, run}
 
-        {:error, reason, run} ->
-          {{:error, "Delegation failed: #{inspect(reason)}"}, run}
-      end
+      {:error, reason, run} ->
+        {{:error, "Delegation failed: #{inspect(reason)}"}, run}
     end
+  end
 
-    task_ref = Task.Supervisor.async_nolink(state.task_supervisor, worker_fn)
+  defp finalize_delegate_result({result, child_run}, next_delegate_count) do
+    {result, child_run, next_delegate_count}
+  end
 
-    delegate_result =
-      case Task.yield(task_ref, :timer.minutes(2)) || Task.shutdown(task_ref) do
-        {:ok, {result, child_run}} -> {result, child_run}
-        {:exit, reason} -> {{:error, "Worker crashed: #{inspect(reason)}"}, nil}
-        nil -> {{:error, "Worker timed out"}, nil}
-      end
+  defp validate_delegate_budget(state) do
+    cond do
+      state.delegate_depth >= state.max_delegate_depth ->
+        {:error,
+         "Delegation blocked: max delegate depth reached (depth=#{state.delegate_depth}, max=#{state.max_delegate_depth})"}
 
-    emit_delegate_telemetry(delegate_result, context_name, delegate_start)
-    delegate_result
+      state.delegate_count >= state.max_delegate_count ->
+        {:error,
+         "Delegation blocked: max delegate count reached (count=#{state.delegate_count}, max=#{state.max_delegate_count})"}
+
+      true ->
+        :ok
+    end
   end
 
   defp normalize_action_name(name) when is_atom(name), do: name
@@ -407,6 +479,10 @@ defmodule RlmMinimalEx.Session do
       max_turns: state.max_turns,
       message_count: length(state.messages),
       conversation_history_count: length(state.conversation_history),
+      delegate_depth: state.delegate_depth,
+      delegate_count: state.delegate_count,
+      max_delegate_depth: state.max_delegate_depth,
+      max_delegate_count: state.max_delegate_count,
       run_status: state.run && state.run.status,
       in_flight_turn: state.in_flight_turn && state.in_flight_turn.turn,
       busy?: state.in_flight_turn != nil,
@@ -471,7 +547,7 @@ defmodule RlmMinimalEx.Session do
 
         {:error, reason} ->
           %{
-            status: :error,
+            status: delegate_error_status(reason),
             context_var: context_name,
             reason: reason,
             child_status: child_run && child_run.status,
@@ -485,6 +561,16 @@ defmodule RlmMinimalEx.Session do
       metadata
     )
   end
+
+  defp delegate_error_status(reason) when is_binary(reason) do
+    if String.starts_with?(reason, "Delegation blocked:") do
+      :blocked
+    else
+      :error
+    end
+  end
+
+  defp delegate_error_status(_reason), do: :error
 
   defp default_system_prompt do
     """

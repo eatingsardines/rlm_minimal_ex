@@ -13,7 +13,7 @@ defmodule RlmMinimalEx do
   `read_var` and `search_context`.
   """
 
-  alias RlmMinimalEx.RuntimeTelemetry
+  alias RlmMinimalEx.{RuntimeTelemetry, Session}
   alias RlmMinimalEx.Trajectory.Run
 
   @type conversation_message :: %{role: :user | :assistant, content: String.t()}
@@ -25,7 +25,11 @@ defmodule RlmMinimalEx do
           max_turns: pos_integer(),
           system_prompt: String.t(),
           context_source: {:env_var, pid(), String.t()},
-          conversation_history: [conversation_message()]
+          conversation_history: [conversation_message()],
+          delegate_depth: non_neg_integer(),
+          delegate_count: non_neg_integer(),
+          max_delegate_depth: non_neg_integer(),
+          max_delegate_count: non_neg_integer()
         ]
 
   @spec run(term(), String.t(), run_opts()) ::
@@ -50,7 +54,13 @@ defmodule RlmMinimalEx do
       max_turns: Keyword.get(opts, :max_turns, 8),
       system_prompt: opts[:system_prompt],
       context_source: opts[:context_source],
-      conversation_history: opts[:conversation_history] || []
+      conversation_history: opts[:conversation_history] || [],
+      delegate_depth: Keyword.get(opts, :delegate_depth, 0),
+      delegate_count: Keyword.get(opts, :delegate_count, 0),
+      max_delegate_depth:
+        Keyword.get(opts, :max_delegate_depth, Session.default_max_delegate_depth()),
+      max_delegate_count:
+        Keyword.get(opts, :max_delegate_count, Session.default_max_delegate_count())
     ]
 
     RuntimeTelemetry.execute(
@@ -59,6 +69,10 @@ defmodule RlmMinimalEx do
       %{
         lane: run_opts[:lane],
         max_turns: run_opts[:max_turns],
+        delegate_depth: run_opts[:delegate_depth],
+        delegate_count: run_opts[:delegate_count],
+        max_delegate_depth: run_opts[:max_delegate_depth],
+        max_delegate_count: run_opts[:max_delegate_count],
         conversation_history_count: length(run_opts[:conversation_history]),
         context_loaded?: not is_nil(context) or not is_nil(run_opts[:context_source])
       }
