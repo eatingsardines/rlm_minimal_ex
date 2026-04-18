@@ -748,6 +748,175 @@ defmodule RlmMinimalEx.SessionTest do
     assert delegate_action.result == "worker saw scoped sentinel"
   end
 
+  test "delegate_subtask blocks nested workers when max delegate depth is reached", %{env: env} do
+    parent = self()
+    top_level_count = :counters.new(1, [:atomics])
+    worker_count = :counters.new(1, [:atomics])
+
+    model_fn = fn _model, messages, _opts ->
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      is_worker =
+        Enum.any?(messages, fn
+          %{"content" => content} when is_binary(content) ->
+            String.contains?(content, "focused worker agent")
+
+          _ ->
+            false
+        end)
+
+      cond do
+        is_worker and :counters.get(worker_count, 1) == 0 ->
+          :counters.add(worker_count, 1, 1)
+
+          call = %{
+            id: "call_delegate_depth_block",
+            name: "delegate_subtask",
+            arguments: %{"task" => "nested worker task"}
+          }
+
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+        is_worker ->
+          send(parent, {:worker_followup_messages, messages})
+          {:ok, :text, "worker handled depth budget", mc}
+
+        :counters.get(top_level_count, 1) == 0 ->
+          :counters.add(top_level_count, 1, 1)
+
+          call = %{
+            id: "call_top_level_delegate",
+            name: "delegate_subtask",
+            arguments: %{"task" => "worker task"}
+          }
+
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+        true ->
+          {:ok, :text, "top level finished", mc}
+      end
+    end
+
+    {:ok, session} =
+      Session.start_link(
+        env_pid: env,
+        model_fn: model_fn,
+        max_turns: 5,
+        max_delegate_depth: 1
+      )
+
+    assert {:ok, "top level finished", run} = Session.run(session, "Delegate once")
+    assert run.status == :completed
+
+    assert_receive {:worker_followup_messages, worker_followup_messages}
+
+    assert Enum.any?(worker_followup_messages, fn
+             %{"role" => "tool", "content" => content} when is_binary(content) ->
+               String.contains?(content, "max delegate depth reached")
+
+             _ ->
+               false
+           end)
+
+    [step1 | _] = run.steps
+    delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
+    child_run = delegate_action.child_run
+
+    assert child_run.status == :completed
+    assert child_run.answer == "worker handled depth budget"
+    assert hd(child_run.steps).actions |> hd() |> Map.get(:result) =~ "max delegate depth reached"
+  end
+
+  test "delegate_subtask blocks repeated delegation when max delegate count is reached", %{
+    env: env
+  } do
+    top_level_count = :counters.new(1, [:atomics])
+
+    model_fn = fn _model, messages, _opts ->
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      is_worker =
+        Enum.any?(messages, fn
+          %{"content" => content} when is_binary(content) ->
+            String.contains?(content, "focused worker agent")
+
+          _ ->
+            false
+        end)
+
+      cond do
+        is_worker ->
+          {:ok, :text, "worker answer", mc}
+
+        :counters.get(top_level_count, 1) == 0 ->
+          :counters.add(top_level_count, 1, 1)
+
+          call = %{
+            id: "call_first_delegate",
+            name: "delegate_subtask",
+            arguments: %{"task" => "first worker"}
+          }
+
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+        :counters.get(top_level_count, 1) == 1 ->
+          :counters.add(top_level_count, 1, 1)
+
+          call = %{
+            id: "call_second_delegate",
+            name: "delegate_subtask",
+            arguments: %{"task" => "second worker"}
+          }
+
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+        true ->
+          {:ok, :text, "top level finished", mc}
+      end
+    end
+
+    {:ok, session} =
+      Session.start_link(
+        env_pid: env,
+        model_fn: model_fn,
+        max_turns: 6,
+        max_delegate_count: 1
+      )
+
+    assert {:ok, "top level finished", run} = Session.run(session, "Delegate twice")
+    assert run.status == :completed
+
+    [step1, step2 | _] = run.root_steps
+    first_delegate = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
+    second_delegate = Enum.find(step2.actions, &(&1.name == :delegate_subtask))
+
+    assert first_delegate.result == "worker answer"
+    assert second_delegate.result =~ "max delegate count reached"
+    assert second_delegate.child_run == nil
+  end
+
   test "delegate_subtask surfaces nested worker timeout as an action error", %{env: env} do
     call_count = :counters.new(1, [:atomics])
 
