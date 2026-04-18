@@ -107,6 +107,7 @@ defmodule RlmMinimalEx.Session do
           path: [turn],
           turn: turn,
           model_call: model_call,
+          assistant_text: content,
           actions: [],
           duration_ms: System.monotonic_time(:millisecond) - turn_start
         }
@@ -123,6 +124,7 @@ defmodule RlmMinimalEx.Session do
           path: [turn],
           turn: turn,
           model_call: model_call,
+          assistant_text: nil,
           actions: action_entries,
           duration_ms: System.monotonic_time(:millisecond) - turn_start
         }

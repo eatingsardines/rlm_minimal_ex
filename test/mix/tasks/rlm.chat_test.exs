@@ -1,0 +1,68 @@
+defmodule Mix.Tasks.Rlm.ChatTest do
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureIO
+
+  defmodule CLIStub do
+    def start(opts) do
+      pid = Application.get_env(:rlm_minimal_ex, :cli_test_pid)
+      send(pid, {:cli_started, opts})
+      :ok
+    end
+  end
+
+  setup do
+    previous_cli_module = Application.get_env(:rlm_minimal_ex, :cli_module)
+    previous_test_pid = Application.get_env(:rlm_minimal_ex, :cli_test_pid)
+
+    Application.put_env(:rlm_minimal_ex, :cli_module, CLIStub)
+    Application.put_env(:rlm_minimal_ex, :cli_test_pid, self())
+
+    on_exit(fn ->
+      if previous_cli_module do
+        Application.put_env(:rlm_minimal_ex, :cli_module, previous_cli_module)
+      else
+        Application.delete_env(:rlm_minimal_ex, :cli_module)
+      end
+
+      if previous_test_pid do
+        Application.put_env(:rlm_minimal_ex, :cli_test_pid, previous_test_pid)
+      else
+        Application.delete_env(:rlm_minimal_ex, :cli_test_pid)
+      end
+    end)
+
+    :ok
+  end
+
+  test "mix rlm.chat delegates to the CLI with parsed options" do
+    capture_io(fn ->
+      Mix.Tasks.Rlm.Chat.run([
+        "--file",
+        "context.txt",
+        "--model",
+        "gpt-test",
+        "--workspace",
+        "--max-turns",
+        "3"
+      ])
+    end)
+
+    assert_receive {:cli_started, opts}
+    assert opts[:file] == "context.txt"
+    assert opts[:run_opts][:model] == "gpt-test"
+    assert opts[:run_opts][:lane] == :workspace
+    assert opts[:run_opts][:max_turns] == 3
+  end
+
+  test "mix rlm.chat prints help text" do
+    output =
+      capture_io(fn ->
+        Mix.Tasks.Rlm.Chat.run(["--help"])
+      end)
+
+    assert output =~ "mix rlm.chat"
+    assert output =~ "--file"
+    assert output =~ "--model"
+  end
+end

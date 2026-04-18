@@ -66,6 +66,7 @@ defmodule RlmMinimalEx.Trajectory do
       :path,
       :turn,
       :model_call,
+      :assistant_text,
       :actions,
       :duration_ms
     ]
@@ -74,6 +75,7 @@ defmodule RlmMinimalEx.Trajectory do
             path: [non_neg_integer()],
             turn: non_neg_integer(),
             model_call: ModelCall.t(),
+            assistant_text: String.t() | nil,
             actions: [Action.t()],
             duration_ms: non_neg_integer() | nil
           }
@@ -207,6 +209,66 @@ defmodule RlmMinimalEx.Trajectory do
       Enum.join([header | lines], "\n")
     end
 
+    @doc """
+    Renders a detailed execution timeline with tool params, results, and assistant text.
+    """
+    def detailed_timeline(%__MODULE__{} = run) do
+      header = [
+        "Run status=#{run.status} total_tokens=#{run.total_tokens}",
+        "Query: #{run.query}"
+      ]
+
+      answer_line =
+        case run.answer do
+          nil -> []
+          answer -> ["Answer: #{answer}"]
+        end
+
+      lines =
+        Enum.flat_map(run.steps, fn %Step{} = step ->
+          indent = String.duplicate("  ", nesting_level(step.path))
+          path = Enum.map_join(step.path, ".", &Integer.to_string/1)
+          action_names = Enum.map_join(step.actions, ", ", &format_action_name/1)
+
+          step_line =
+            "#{indent}[#{path}] turn=#{step.turn} response=#{step.model_call.response_type}" <>
+              " model=#{step.model_call.model}" <>
+              maybe_suffix(" input_tokens", step.model_call.input_tokens) <>
+              maybe_suffix(" output_tokens", step.model_call.output_tokens) <>
+              maybe_suffix(" duration_ms", step.duration_ms) <>
+              if(action_names == "", do: "", else: " tool_calls=[#{action_names}]")
+
+          action_lines =
+            Enum.flat_map(step.actions, fn %Action{} = action ->
+              action_indent = indent <> "  "
+
+              [
+                "#{action_indent}- action=#{action.name} executor=#{action.executor}" <>
+                  maybe_suffix(" duration_ms", action.duration_ms),
+                "#{action_indent}  params: #{inspect(action.params, pretty: true)}",
+                "#{action_indent}  result:",
+                indent_block(to_string(action.result), action_indent <> "    ")
+              ]
+            end)
+
+          assistant_lines =
+            case step.assistant_text do
+              nil ->
+                []
+
+              text ->
+                [
+                  indent <> "  assistant:",
+                  indent_block(text, indent <> "    ")
+                ]
+            end
+
+          [step_line | action_lines ++ assistant_lines]
+        end)
+
+      Enum.join(header ++ answer_line ++ lines, "\n")
+    end
+
     defp flatten_nested_steps(%__MODULE__{} = run, prefix) do
       Enum.map(run.steps, fn %Step{} = step ->
         %{step | path: prefix ++ step.path}
@@ -218,5 +280,14 @@ defmodule RlmMinimalEx.Trajectory do
     defp nesting_level(path), do: div(length(path) - 1, 2)
 
     defp nested_step_path?(path), do: length(path) > 1
+
+    defp maybe_suffix(_label, nil), do: ""
+    defp maybe_suffix(label, value), do: "#{label}=#{value}"
+
+    defp indent_block(text, indent) do
+      text
+      |> String.split("\n")
+      |> Enum.map_join("\n", fn line -> indent <> line end)
+    end
   end
 end
