@@ -268,22 +268,12 @@ defmodule RlmMinimalEx.CLI.Runner do
     say(opts, "3. Start over with new context")
     say(opts, "4. Exit")
 
-    case IO.normalized_gets(io(opts), "> ") do
+    case normalize_post_run_choice(IO.normalized_gets(io(opts), "> ")) do
       "1" ->
         blank(opts)
         loop(state, opts)
 
-      "ask again" ->
-        blank(opts)
-        loop(state, opts)
-
       "2" ->
-        blank(opts)
-        say(opts, Run.detailed_timeline(state.last_run))
-        blank(opts)
-        post_run_menu(state, opts)
-
-      "timeline" ->
         blank(opts)
         say(opts, Run.detailed_timeline(state.last_run))
         blank(opts)
@@ -297,18 +287,7 @@ defmodule RlmMinimalEx.CLI.Runner do
           Keyword.delete(opts, :file)
         )
 
-      "start over" ->
-        blank(opts)
-
-        loop(
-          %{state | context: nil, last_answer: nil, last_run: nil},
-          Keyword.delete(opts, :file)
-        )
-
       "4" ->
-        :ok
-
-      "exit" ->
         :ok
 
       nil ->
@@ -367,6 +346,12 @@ defmodule RlmMinimalEx.CLI.Runner do
         post_error_menu(state, opts)
     end
   end
+
+  defp normalize_post_run_choice("ask again"), do: "1"
+  defp normalize_post_run_choice("timeline"), do: "2"
+  defp normalize_post_run_choice("start over"), do: "3"
+  defp normalize_post_run_choice("exit"), do: "4"
+  defp normalize_post_run_choice(choice), do: choice
 
   defp format_file_error(:enoent), do: "file not found"
   defp format_file_error(reason), do: :file.format_error(reason) |> to_string()
