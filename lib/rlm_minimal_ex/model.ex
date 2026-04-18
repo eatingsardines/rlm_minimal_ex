@@ -112,17 +112,20 @@ defmodule RlmMinimalEx.Model do
   defp parse_one_tool_call(%{"function" => func} = tc) when is_map(func) do
     args_raw = func["arguments"]
 
-    case decode_arguments(args_raw) do
-      {:ok, args} ->
-        {:ok,
-         %{
-           id: tc["id"],
-           name: func["name"],
-           arguments: args
-         }}
+    with {:ok, id} <- require_string(tc["id"], "tool_call.id", tc),
+         {:ok, name} <- require_string(func["name"], "tool_call.function.name", tc) do
+      case decode_arguments(args_raw) do
+        {:ok, args} ->
+          {:ok,
+           %{
+             id: id,
+             name: name,
+             arguments: args
+           }}
 
-      {:error, reason} ->
-        {:error, {:bad_tool_arguments, reason, args_raw}}
+        {:error, reason} ->
+          {:error, {:bad_tool_arguments, reason, args_raw}}
+      end
     end
   end
 
@@ -134,12 +137,20 @@ defmodule RlmMinimalEx.Model do
 
   defp decode_arguments(args) when is_binary(args) do
     case Jason.decode(args) do
-      {:ok, decoded} -> {:ok, decoded}
-      {:error, reason} -> {:error, reason}
+      {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
+      {:ok, decoded} -> {:error, {:arguments_must_decode_to_object, decoded}}
+      {:error, reason} -> {:error, {:invalid_json, reason}}
     end
   end
 
   defp decode_arguments(other), do: {:error, {:unexpected_type, other}}
+
+  defp require_string(value, _field, _context) when is_binary(value) and value != "",
+    do: {:ok, value}
+
+  defp require_string(_value, field, context) do
+    {:error, {:malformed_response, "#{field} missing or invalid", context}}
+  end
 
   defp maybe_add_tools(body, []), do: body
   defp maybe_add_tools(body, tools), do: Map.put(body, "tools", tools)

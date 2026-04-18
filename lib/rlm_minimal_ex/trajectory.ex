@@ -142,5 +142,12 @@ defmodule RlmMinimalEx.Trajectory do
     def fail(%__MODULE__{} = run) do
       %{run | status: :failed, completed_at: DateTime.utc_now()}
     end
+
+    @doc """
+    Marks the run as timed out.
+    """
+    def timeout(%__MODULE__{} = run) do
+      %{run | status: :timeout, completed_at: DateTime.utc_now()}
+    end
   end
 end

@@ -54,6 +54,35 @@ defmodule RlmMinimalEx.SessionTest do
     end
   end
 
+  defp tool_sequence_then_text_model(tool_calls, final_text) do
+    call_count = :counters.new(1, [:atomics])
+
+    fn _model, messages, _opts ->
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      index = :counters.get(call_count, 1)
+      :counters.add(call_count, 1, 1)
+
+      case Enum.at(tool_calls, index) do
+        nil ->
+          {:ok, :text, final_text, mc}
+
+        call ->
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: [call.name]}}
+      end
+    end
+  end
+
   defp error_model(reason) do
     fn _model, _messages, _opts ->
       {:error, reason}
@@ -139,6 +168,40 @@ defmodule RlmMinimalEx.SessionTest do
     assert run.total_tokens > 0
   end
 
+  test "default system prompt instructs the coordinator to inspect context first", %{env: env} do
+    parent = self()
+
+    model_fn = fn _model, messages, _opts ->
+      send(parent, {:messages_seen, messages})
+
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      {:ok, :text, "done", mc}
+    end
+
+    {:ok, session} = Session.start_link(env_pid: env, model_fn: model_fn, max_turns: 5)
+
+    assert {:ok, "done", run} = Session.run(session, "What is the magic number?")
+    assert run.status == :completed
+
+    assert_receive {:messages_seen,
+                    [%{"role" => "system", "content" => system_prompt}, _user_msg]}
+
+    assert system_prompt =~ "read_text_range"
+    assert system_prompt =~ "read_lines"
+    assert system_prompt =~ "write_scratchpad"
+    assert system_prompt =~ "Do not answer until you have inspected the context"
+  end
+
   test "tool call then text answer", %{env: env} do
     model_fn = tool_then_text_model("read_var", %{"name" => "context"}, "42")
 
@@ -154,6 +217,87 @@ defmodule RlmMinimalEx.SessionTest do
     assert step2.actions == []
   end
 
+  test "slice_text can create and reuse a stored chunk in one run", %{env: env} do
+    model_fn =
+      tool_sequence_then_text_model(
+        [
+          %{
+            id: "call_slice_1",
+            name: "slice_text",
+            arguments: %{
+              "source" => "context",
+              "offset" => 4,
+              "length" => 15,
+              "target" => "focus_chunk"
+            }
+          },
+          %{
+            id: "call_read_2",
+            name: "read_var",
+            arguments: %{"name" => "focus_chunk"}
+          }
+        ],
+        "The answer is still 42."
+      )
+
+    {:ok, session} = Session.start_link(env_pid: env, model_fn: model_fn, max_turns: 5)
+
+    assert {:ok, "The answer is still 42.", run} = Session.run(session, "Inspect a chunk first")
+    assert run.status == :completed
+    assert length(run.steps) == 3
+
+    [step1, step2, step3] = run.steps
+    assert hd(step1.actions).name == :slice_text
+    assert hd(step1.actions).result =~ "Stored 'focus_chunk' (15 chars) from 'context'"
+    assert hd(step1.actions).result =~ "Content:\nmagic number is"
+
+    assert hd(step2.actions).name == :read_var
+    assert hd(step2.actions).result =~ "focus_chunk = magic number is"
+
+    assert step3.actions == []
+  end
+
+  test "write_scratchpad can persist intermediate coordinator state in read_only lane", %{
+    env: env
+  } do
+    model_fn =
+      tool_sequence_then_text_model(
+        [
+          %{
+            id: "call_scratch_1",
+            name: "write_scratchpad",
+            arguments: %{
+              "name" => "summary",
+              "value" => "The magic number appears to be 42."
+            }
+          },
+          %{
+            id: "call_read_2",
+            name: "read_var",
+            arguments: %{"name" => "scratch:summary"}
+          }
+        ],
+        "42"
+      )
+
+    {:ok, session} = Session.start_link(env_pid: env, model_fn: model_fn, max_turns: 5)
+
+    assert {:ok, "42", run} =
+             Session.run(session, "Store an intermediate summary before answering")
+
+    assert run.status == :completed
+    assert length(run.steps) == 3
+
+    [step1, step2, step3] = run.steps
+    assert hd(step1.actions).name == :write_scratchpad
+    assert hd(step1.actions).result =~ "Stored scratch 'summary' as 'scratch:summary'"
+
+    assert hd(step2.actions).name == :read_var
+    assert hd(step2.actions).result =~ "scratch:summary = The magic number appears to be 42."
+
+    assert step3.actions == []
+  end
+
   test "model error returns error tuple", %{env: env} do
     {:ok, session} =
       Session.start_link(env_pid: env, model_fn: error_model(:timeout), max_turns: 5)
@@ -162,12 +306,12 @@ defmodule RlmMinimalEx.SessionTest do
     assert run.status == :failed
   end
 
-  test "max turns triggers fallback", %{env: env} do
+  test "max turns returns timeout error", %{env: env} do
     {:ok, session} =
       Session.start_link(env_pid: env, model_fn: always_tool_model(), max_turns: 2)
 
-    assert {:ok, _answer, run} = Session.run(session, "test")
-    assert run.status == :completed
+    assert {:error, :max_turns_exceeded, run} = Session.run(session, "test")
+    assert run.status == :timeout
     assert length(run.steps) == 2
   end
 
@@ -182,6 +326,290 @@ defmodule RlmMinimalEx.SessionTest do
     [step1 | _] = run.steps
     delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
     assert delegate_action.executor == :session
+  end
+
+  test "delegate_subtask runs a nested worker session against scoped context beyond 4 KB" do
+    sentinel = "ORCHID-SENTINEL-9001"
+    large_context = String.duplicate("a", 5_000) <> sentinel
+
+    {:ok, env} =
+      Environment.start_link(
+        context: large_context,
+        query: "Find the sentinel",
+        lane: :read_only
+      )
+
+    parent = self()
+    call_count = :counters.new(1, [:atomics])
+
+    model_fn = fn _model, messages, _opts ->
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      is_worker =
+        Enum.any?(messages, fn
+          %{"content" => c} when is_binary(c) -> String.contains?(c, "focused worker")
+          _ -> false
+        end)
+
+      has_tool_result =
+        Enum.any?(messages, fn
+          %{"role" => "tool", "content" => c} when is_binary(c) -> String.contains?(c, sentinel)
+          _ -> false
+        end)
+
+      cond do
+        is_worker and has_tool_result ->
+          send(parent, {:worker_followup_messages, messages})
+
+          {:ok, :text, "worker saw sentinel", mc}
+
+        is_worker ->
+          send(parent, {:worker_initial_messages, messages})
+
+          call = %{
+            id: "call_worker_search",
+            name: "search_context",
+            arguments: %{"query" => sentinel}
+          }
+
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: ["search_context"]}}
+
+        true ->
+          n = :counters.get(call_count, 1)
+          :counters.add(call_count, 1, 1)
+
+          case n do
+            0 ->
+              call = %{
+                id: "call_delegate_full_context",
+                name: "delegate_subtask",
+                arguments: %{
+                  "task" => "Find the sentinel",
+                  "context_var" => "context"
+                }
+              }
+
+              {:ok, :tool_calls, [call],
+               %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+            _ ->
+              {:ok, :text, "delegated", mc}
+          end
+      end
+    end
+
+    {:ok, session} = Session.start_link(env_pid: env, model_fn: model_fn, max_turns: 5)
+
+    assert {:ok, "delegated", run} = Session.run(session, "Use a worker to inspect the context")
+    assert run.status == :completed
+
+    assert_receive {:worker_initial_messages, worker_initial_messages}
+
+    refute Enum.any?(worker_initial_messages, fn
+             %{"content" => c} when is_binary(c) -> String.contains?(c, sentinel)
+             _ -> false
+           end)
+
+    assert_receive {:worker_followup_messages, worker_followup_messages}
+
+    assert Enum.any?(worker_followup_messages, fn
+             %{"role" => "tool", "content" => c} when is_binary(c) ->
+               String.contains?(c, sentinel)
+
+             _ ->
+               false
+           end)
+
+    [step1 | _] = run.steps
+    delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
+    assert delegate_action.result == "worker saw sentinel"
+  end
+
+  test "delegate_subtask can scope a nested worker to a large stored variable beyond 4 KB" do
+    sentinel = "SCOPED-VAR-SENTINEL-77"
+
+    {:ok, env} =
+      Environment.start_link(
+        context: "outer context",
+        query: "Find the sentinel",
+        lane: :workspace
+      )
+
+    assert {:ok, _content} =
+             Environment.execute(env, :write_var, %{
+               "name" => "focus_chunk",
+               "value" => String.duplicate("b", 5_000) <> sentinel
+             })
+
+    parent = self()
+    call_count = :counters.new(1, [:atomics])
+
+    model_fn = fn _model, messages, _opts ->
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      is_worker =
+        Enum.any?(messages, fn
+          %{"content" => c} when is_binary(c) -> String.contains?(c, "focused worker")
+          _ -> false
+        end)
+
+      has_tool_result =
+        Enum.any?(messages, fn
+          %{"role" => "tool", "content" => c} when is_binary(c) -> String.contains?(c, sentinel)
+          _ -> false
+        end)
+
+      cond do
+        is_worker and has_tool_result ->
+          send(parent, {:scoped_worker_followup_messages, messages})
+          {:ok, :text, "worker saw scoped sentinel", mc}
+
+        is_worker ->
+          send(parent, {:scoped_worker_initial_messages, messages})
+
+          call = %{
+            id: "call_worker_scoped_search",
+            name: "search_context",
+            arguments: %{"query" => sentinel}
+          }
+
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: ["search_context"]}}
+
+        true ->
+          n = :counters.get(call_count, 1)
+          :counters.add(call_count, 1, 1)
+
+          case n do
+            0 ->
+              call = %{
+                id: "call_delegate_scoped_var",
+                name: "delegate_subtask",
+                arguments: %{
+                  "task" => "Find the sentinel in the scoped chunk",
+                  "context_var" => "focus_chunk"
+                }
+              }
+
+              {:ok, :tool_calls, [call],
+               %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+            _ ->
+              {:ok, :text, "delegated via scoped var", mc}
+          end
+      end
+    end
+
+    {:ok, session} =
+      Session.start_link(env_pid: env, model_fn: model_fn, max_turns: 5, lane: :workspace)
+
+    assert {:ok, "delegated via scoped var", run} =
+             Session.run(session, "Use a worker on the scoped chunk")
+
+    assert run.status == :completed
+
+    assert_receive {:scoped_worker_initial_messages, scoped_worker_initial_messages}
+
+    refute Enum.any?(scoped_worker_initial_messages, fn
+             %{"content" => c} when is_binary(c) -> String.contains?(c, sentinel)
+             _ -> false
+           end)
+
+    assert_receive {:scoped_worker_followup_messages, scoped_worker_followup_messages}
+
+    assert Enum.any?(scoped_worker_followup_messages, fn
+             %{"role" => "tool", "content" => c} when is_binary(c) ->
+               String.contains?(c, sentinel)
+
+             _ ->
+               false
+           end)
+
+    [step1 | _] = run.steps
+    delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
+    assert delegate_action.result == "worker saw scoped sentinel"
+  end
+
+  test "delegate_subtask surfaces nested worker timeout as an action error", %{env: env} do
+    call_count = :counters.new(1, [:atomics])
+
+    model_fn = fn _model, messages, _opts ->
+      mc = %ModelCall{
+        model: "test",
+        messages_in: length(messages),
+        tools_offered: [],
+        tool_calls_made: [],
+        response_type: :text,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      is_worker =
+        Enum.any?(messages, fn
+          %{"content" => c} when is_binary(c) -> String.contains?(c, "focused worker")
+          _ -> false
+        end)
+
+      cond do
+        is_worker ->
+          call = %{
+            id: "call_worker_timeout",
+            name: "read_var",
+            arguments: %{"name" => "context"}
+          }
+
+          {:ok, :tool_calls, [call],
+           %{mc | response_type: :tool_calls, tool_calls_made: ["read_var"]}}
+
+        true ->
+          n = :counters.get(call_count, 1)
+          :counters.add(call_count, 1, 1)
+
+          case n do
+            0 ->
+              call = %{
+                id: "call_delegate_timeout",
+                name: "delegate_subtask",
+                arguments: %{"task" => "Keep reading forever"}
+              }
+
+              {:ok, :tool_calls, [call],
+               %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
+
+            _ ->
+              {:ok, :text, "outer recovered", mc}
+          end
+      end
+    end
+
+    {:ok, session} = Session.start_link(env_pid: env, model_fn: model_fn, max_turns: 2)
+
+    assert {:ok, "outer recovered", run} = Session.run(session, "Delegate and recover")
+    assert run.status == :completed
+
+    [step1 | _] = run.steps
+    delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
+    assert delegate_action.result =~ "ERROR: Delegation failed: :max_turns_exceeded"
   end
 
   test "delegate_subtask survives worker crash", %{env: env} do
@@ -229,5 +657,7 @@ defmodule RlmMinimalEx.SessionTest do
     [step1 | _] = run.steps
     delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
     assert delegate_action.result =~ "ERROR"
+    assert delegate_action.result =~ "Worker crashed"
+    assert delegate_action.result =~ "worker exploded!"
   end
 end

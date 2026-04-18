@@ -32,11 +32,25 @@ defmodule RlmMinimalEx.Actions do
       }
     },
     %{
+      name: :write_scratchpad,
+      executor: :environment,
+      lane: :read_only,
+      description: "Store intermediate text in the scratchpad namespace",
+      parameters: %{
+        "type" => "object",
+        "properties" => %{
+          "name" => %{"type" => "string", "description" => "Scratch variable name"},
+          "value" => %{"type" => "string", "description" => "Scratch value to store"}
+        },
+        "required" => ["name", "value"]
+      }
+    },
+    %{
       name: :slice_text,
       executor: :environment,
       lane: :read_only,
       description:
-        "Extract a substring from a variable by character offset and length, storing the result",
+        "Extract a substring from a variable by character offset and length, storing and returning the result",
       parameters: %{
         "type" => "object",
         "properties" => %{
@@ -49,6 +63,36 @@ defmodule RlmMinimalEx.Actions do
           }
         },
         "required" => ["source", "offset", "length", "target"]
+      }
+    },
+    %{
+      name: :read_text_range,
+      executor: :environment,
+      lane: :read_only,
+      description: "Read a character range from a stored string variable",
+      parameters: %{
+        "type" => "object",
+        "properties" => %{
+          "source" => %{"type" => "string", "description" => "Source variable name"},
+          "offset" => %{"type" => "integer", "description" => "Character offset (0-based)"},
+          "length" => %{"type" => "integer", "description" => "Number of characters to read"}
+        },
+        "required" => ["source", "offset", "length"]
+      }
+    },
+    %{
+      name: :read_lines,
+      executor: :environment,
+      lane: :read_only,
+      description: "Read an inclusive line range from a stored string variable",
+      parameters: %{
+        "type" => "object",
+        "properties" => %{
+          "source" => %{"type" => "string", "description" => "Source variable name"},
+          "start_line" => %{"type" => "integer", "description" => "First line number (1-based)"},
+          "end_line" => %{"type" => "integer", "description" => "Last line number (1-based)"}
+        },
+        "required" => ["source", "start_line", "end_line"]
       }
     },
     %{
@@ -68,6 +112,30 @@ defmodule RlmMinimalEx.Actions do
           }
         },
         "required" => ["query"]
+      }
+    },
+    %{
+      name: :list_vars,
+      executor: :environment,
+      lane: :read_only,
+      description: "List stored variables with type and size metadata",
+      parameters: %{
+        "type" => "object",
+        "properties" => %{},
+        "required" => []
+      }
+    },
+    %{
+      name: :describe_var,
+      executor: :environment,
+      lane: :read_only,
+      description: "Describe one stored variable including metadata and a short preview",
+      parameters: %{
+        "type" => "object",
+        "properties" => %{
+          "name" => %{"type" => "string", "description" => "Variable name to describe"}
+        },
+        "required" => ["name"]
       }
     },
     %{

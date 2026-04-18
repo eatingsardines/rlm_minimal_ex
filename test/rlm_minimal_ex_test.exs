@@ -55,6 +55,40 @@ defmodule RlmMinimalExTest do
     assert run.status == :failed
   end
 
+  test "run/3 returns timeout error when max turns are exhausted" do
+    call_count = :counters.new(1, [:atomics])
+
+    always_tool_model = fn _model, _messages, _opts ->
+      mc = %ModelCall{
+        model: "test",
+        messages_in: 1,
+        tools_offered: [],
+        tool_calls_made: ["read_var"],
+        response_type: :tool_calls,
+        input_tokens: 10,
+        output_tokens: 5,
+        duration_ms: 1
+      }
+
+      call_id = :counters.get(call_count, 1)
+      :counters.add(call_count, 1, 1)
+
+      call = %{
+        id: "call_timeout_#{call_id}",
+        name: "read_var",
+        arguments: %{"name" => "context"}
+      }
+
+      {:ok, :tool_calls, [call], mc}
+    end
+
+    assert {:error, :max_turns_exceeded, run} =
+             RlmMinimalEx.run("ctx", "query", model_fn: always_tool_model, max_turns: 2)
+
+    assert run.status == :timeout
+    assert length(run.steps) == 2
+  end
+
   test "run cleans up processes after completion" do
     RlmMinimalEx.run("ctx", "q", model_fn: text_model("done"))
 

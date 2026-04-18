@@ -96,17 +96,21 @@ defmodule RlmMinimalEx.Environment do
     if state.lane == :read_only do
       {{:error, "Write not permitted in read_only lane"}, state}
     else
-      :ets.insert(state.ets, {name, value})
-
-      meta =
-        Map.put(state.var_meta, name, %{
-          type: type_of(value),
-          created_at: DateTime.utc_now(),
-          size: byte_size_of(value)
-        })
-
-      {{:ok, "Stored '#{name}' (#{byte_size_of(value)} bytes)"}, %{state | var_meta: meta}}
+      state = put_var(state, name, value)
+      {{:ok, "Stored '#{name}' (#{byte_size_of(value)} bytes)"}, state}
     end
+  end
+
+  defp do_execute(:write_scratchpad, %{"name" => name, "value" => value}, state) do
+    key = scratchpad_key(name)
+
+    state =
+      put_var(state, key, value, %{
+        scope: :scratch,
+        scratch_name: name
+      })
+
+    {{:ok, "Stored scratch '#{name}' as '#{key}' (#{byte_size_of(value)} bytes)"}, state}
   end
 
   defp do_execute(
@@ -129,11 +133,60 @@ defmodule RlmMinimalEx.Environment do
             size: byte_size(sliced)
           })
 
-        {{:ok, "Sliced #{String.length(sliced)} chars from '#{source}' into '#{target}'"},
-         %{state | var_meta: meta}}
+        content = """
+        Stored '#{target}' (#{String.length(sliced)} chars) from '#{source}'
+        Content:
+        #{sliced}
+        """
+
+        {{:ok, String.trim(content)}, %{state | var_meta: meta}}
 
       _other ->
         {{:error, "Variable '#{source}' is not a string"}, state}
+    end
+  end
+
+  defp do_execute(
+         :read_text_range,
+         %{"source" => source, "offset" => offset, "length" => len},
+         state
+       ) do
+    with {:ok, value} <- fetch_string_var(state, source),
+         {:ok, offset} <- validate_non_negative_integer(offset, "offset"),
+         {:ok, len} <- validate_non_negative_integer(len, "length") do
+      chunk = String.slice(value, offset, len) || ""
+      {{:ok, chunk}, state}
+    else
+      {:error, _reason} = error -> {error, state}
+    end
+  end
+
+  defp do_execute(
+         :read_lines,
+         %{"source" => source, "start_line" => start_line, "end_line" => end_line},
+         state
+       ) do
+    with {:ok, value} <- fetch_string_var(state, source),
+         {:ok, start_line} <- validate_positive_integer(start_line, "start_line"),
+         {:ok, end_line} <- validate_positive_integer(end_line, "end_line"),
+         :ok <- validate_line_range(start_line, end_line) do
+      lines =
+        value
+        |> String.split("\n")
+        |> Enum.with_index(1)
+        |> Enum.filter(fn {_line, number} -> number >= start_line and number <= end_line end)
+        |> Enum.map_join("\n", fn {line, number} -> "L#{number}: #{line}" end)
+
+      content =
+        if lines == "" do
+          "No lines found in range #{start_line}-#{end_line} for '#{source}'"
+        else
+          lines
+        end
+
+      {{:ok, content}, state}
+    else
+      {:error, _reason} = error -> {error, state}
     end
   end
 
@@ -168,6 +221,42 @@ defmodule RlmMinimalEx.Environment do
     end
   end
 
+  defp do_execute(:list_vars, _params, state) do
+    listing =
+      state.var_meta
+      |> Enum.sort_by(fn {name, _meta} -> name end)
+      |> Enum.map_join("\n", fn {name, meta} ->
+        "#{name} (type=#{meta.type}, size=#{meta.size} bytes)"
+      end)
+
+    content =
+      if listing == "" do
+        "No variables stored"
+      else
+        listing
+      end
+
+    {{:ok, content}, state}
+  end
+
+  defp do_execute(:describe_var, %{"name" => name}, state) do
+    case {Map.get(state.var_meta, name), ets_get(state.ets, name)} do
+      {nil, _} ->
+        {{:error, "Variable '#{name}' not found"}, state}
+
+      {meta, value} ->
+        content = """
+        name: #{name}
+        type: #{meta.type}
+        size_bytes: #{meta.size}
+        created_at: #{DateTime.to_iso8601(meta.created_at)}
+        preview: #{preview(value)}
+        """
+
+        {{:ok, String.trim(content)}, state}
+    end
+  end
+
   defp do_execute(action, _params, state) do
     {{:error, "Unknown environment action: #{action}"}, state}
   end
@@ -188,6 +277,53 @@ defmodule RlmMinimalEx.Environment do
   end
 
   defp preview(value), do: inspect(value, limit: 5, printable_limit: 200)
+
+  defp fetch_string_var(state, name) do
+    case ets_get(state.ets, name) do
+      nil -> {:error, "Variable '#{name}' not found"}
+      value when is_binary(value) -> {:ok, value}
+      _other -> {:error, "Variable '#{name}' is not a string"}
+    end
+  end
+
+  defp put_var(state, name, value, extra_meta \\ %{}) do
+    :ets.insert(state.ets, {name, value})
+
+    meta =
+      Map.merge(
+        %{
+          type: type_of(value),
+          created_at: DateTime.utc_now(),
+          size: byte_size_of(value)
+        },
+        extra_meta
+      )
+
+    %{state | var_meta: Map.put(state.var_meta, name, meta)}
+  end
+
+  defp scratchpad_key(name) when is_binary(name) do
+    if String.starts_with?(name, "scratch:") do
+      name
+    else
+      "scratch:" <> name
+    end
+  end
+
+  defp validate_non_negative_integer(value, _field) when is_integer(value) and value >= 0,
+    do: {:ok, value}
+
+  defp validate_non_negative_integer(_value, field),
+    do: {:error, "#{field} must be a non-negative integer"}
+
+  defp validate_positive_integer(value, _field) when is_integer(value) and value >= 1,
+    do: {:ok, value}
+
+  defp validate_positive_integer(_value, field),
+    do: {:error, "#{field} must be a positive integer"}
+
+  defp validate_line_range(start_line, end_line) when start_line <= end_line, do: :ok
+  defp validate_line_range(_start_line, _end_line), do: {:error, "start_line must be <= end_line"}
 
   defp type_of(v) when is_binary(v), do: :string
   defp type_of(v) when is_list(v), do: :list

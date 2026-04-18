@@ -91,9 +91,8 @@ defmodule RlmMinimalEx.Session do
 
   @impl true
   def handle_info({:do_turn, turn}, state) when turn >= state.max_turns do
-    answer = extract_last_assistant_content(state.messages)
-    run = Run.complete(state.run, answer)
-    GenServer.reply(state.reply_to, {:ok, answer, run})
+    run = Run.timeout(state.run)
+    GenServer.reply(state.reply_to, {:error, :max_turns_exceeded, run})
     {:noreply, %{state | run: run}}
   end
 
@@ -227,26 +226,18 @@ defmodule RlmMinimalEx.Session do
         Environment.get_var(state.env_pid, "context")
       end
 
+    worker_opts = [
+      model: state.model_name,
+      model_fn: state.model_fn,
+      lane: state.lane,
+      max_turns: state.max_turns,
+      system_prompt: worker_system_prompt()
+    ]
+
     worker_fn = fn ->
-      # Delegated workers are one-shot tasks for now, not long-lived processes.
-      worker_prompt = """
-      You are a focused worker agent. Answer the following task concisely and accurately.
-      If context is provided, use it to inform your answer.
-
-      Context:
-      #{preview_context(context)}
-
-      Task: #{task}
-      """
-
-      messages = [
-        %{"role" => "system", "content" => "You are a helpful assistant. Answer concisely."},
-        %{"role" => "user", "content" => worker_prompt}
-      ]
-
-      case state.model_fn.(state.model_name, messages, []) do
-        {:ok, :text, content, _model_call} -> {:ok, content}
-        {:ok, :tool_calls, _calls, _mc} -> {:ok, "(Worker produced tool calls, not text)"}
+      case RlmMinimalEx.run(context, task, worker_opts) do
+        {:ok, answer, _run} -> {:ok, answer}
+        {:error, reason, _run} -> {:error, "Delegation failed: #{inspect(reason)}"}
         {:error, reason} -> {:error, "Delegation failed: #{inspect(reason)}"}
       end
     end
@@ -268,37 +259,43 @@ defmodule RlmMinimalEx.Session do
     ArgumentError -> name
   end
 
-  defp preview_context(nil), do: "(no context)"
-
-  defp preview_context(ctx) when is_binary(ctx) and byte_size(ctx) > 4_000 do
-    String.slice(ctx, 0, 4_000) <> "\n... (truncated)"
-  end
-
-  defp preview_context(ctx) when is_binary(ctx), do: ctx
-  defp preview_context(ctx), do: inspect(ctx, limit: 50, printable_limit: 4_000)
-
-  defp extract_last_assistant_content(messages) do
-    messages
-    |> Enum.reverse()
-    |> Enum.find_value(fn
-      %{"role" => "assistant", "content" => c} when is_binary(c) -> c
-      _ -> nil
-    end) || "No answer produced"
-  end
-
   defp default_system_prompt do
     """
     You are a coordinator agent in the RlmMinimalEx runtime. You have access to tools \
-    that let you read and search an externalized context, store intermediate results, \
-    and delegate subtasks to worker agents.
+    that let you inspect an externalized context, store intermediate results in the \
+    scratchpad namespace, and delegate subtasks to worker agents.
 
     Strategy:
-    1. Start by reading or searching the context to understand what you're working with.
-    2. If the task is complex, break it into subtasks and delegate them.
-    3. Use search_context to find relevant information before answering.
-    4. When you have enough information, respond with your final answer as plain text.
+    1. Start by inspecting the externalized context before answering. Prefer tools such as \
+    search_context, read_var, read_text_range, and read_lines to gather evidence.
+    2. If you discover a useful intermediate result, store it with write_scratchpad so you can \
+    reuse it in later turns.
+    3. Use slice_text to create focused chunks when a smaller section of the context is easier \
+    to reason about than the whole input.
+    4. If the task is complex, break it into subtasks and delegate them only after inspecting \
+    the relevant context yourself.
+    5. Do not answer until you have inspected the context with at least one read/search tool \
+    unless the user explicitly gave you the answer in the query itself.
+    6. When you have enough information, respond with your final answer as plain text.
 
     Be precise. Be concise. Use the tools when they help, but don't over-use them.\
+    """
+  end
+
+  defp worker_system_prompt do
+    """
+    You are a focused worker agent in the RlmMinimalEx runtime. You are solving a scoped task \
+    against a scoped externalized context. Use the available tools to inspect the context before \
+    answering.
+
+    Strategy:
+    1. Inspect the scoped context with read/search tools before answering.
+    2. Use write_scratchpad if intermediate notes help.
+    3. Use slice_text when a smaller chunk is easier to reason about.
+    4. Delegate again only if absolutely necessary.
+    5. Return your final answer as plain text once you have enough evidence.
+
+    Be concise, accurate, and tool-using when it helps.\
     """
   end
 end
