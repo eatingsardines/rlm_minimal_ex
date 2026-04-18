@@ -104,6 +104,7 @@ defmodule RlmMinimalEx.Session do
     case state.model_fn.(state.model_name, state.messages, tools: tools) do
       {:ok, :text, content, model_call} ->
         step = %Step{
+          path: [turn],
           turn: turn,
           model_call: model_call,
           actions: [],
@@ -116,8 +117,10 @@ defmodule RlmMinimalEx.Session do
 
       {:ok, :tool_calls, calls, model_call} ->
         {action_entries, tool_messages} = execute_tool_calls(calls, state)
+        child_runs = child_runs(action_entries)
 
         step = %Step{
+          path: [turn],
           turn: turn,
           model_call: model_call,
           actions: action_entries,
@@ -142,7 +145,7 @@ defmodule RlmMinimalEx.Session do
         }
 
         messages = state.messages ++ [assistant_msg | tool_messages]
-        run = Run.add_step(state.run, step)
+        run = Run.add_step(state.run, step, child_runs)
 
         send(self(), {:do_turn, turn + 1})
         {:noreply, %{state | messages: messages, run: run}}
@@ -174,7 +177,7 @@ defmodule RlmMinimalEx.Session do
       action_name = safe_to_atom(call.name)
       action_start = System.monotonic_time(:millisecond)
 
-      {result, executor} = dispatch_action(action_name, call.arguments, state)
+      {result, executor, child_run} = dispatch_action(action_name, call.arguments, state)
       duration = System.monotonic_time(:millisecond) - action_start
 
       content =
@@ -187,6 +190,7 @@ defmodule RlmMinimalEx.Session do
         name: action_name,
         params: call.arguments,
         result: content,
+        child_run: child_run,
         executor: executor,
         duration_ms: duration,
         timestamp: DateTime.utc_now()
@@ -202,13 +206,21 @@ defmodule RlmMinimalEx.Session do
     end)
   end
 
+  defp child_runs(actions) do
+    Enum.flat_map(actions, fn
+      %Action{child_run: nil} -> []
+      %Action{child_run: child_run} -> [child_run]
+    end)
+  end
+
   defp dispatch_action(:delegate_subtask, params, state) do
-    {do_delegate(params, state), :session}
+    {result, child_run} = do_delegate(params, state)
+    {result, :session, child_run}
   end
 
   defp dispatch_action(action_name, params, state) do
     result = Environment.execute(state.env_pid, action_name, params)
-    {result, :environment}
+    {result, :environment, nil}
   end
 
   defp do_delegate(params, state) do
@@ -232,18 +244,18 @@ defmodule RlmMinimalEx.Session do
 
     worker_fn = fn ->
       case RlmMinimalEx.run(context, task, worker_opts) do
-        {:ok, answer, _run} -> {:ok, answer}
-        {:error, reason, _run} -> {:error, "Delegation failed: #{inspect(reason)}"}
-        {:error, reason} -> {:error, "Delegation failed: #{inspect(reason)}"}
+        {:ok, answer, run} -> {{:ok, answer}, run}
+        {:error, reason, run} -> {{:error, "Delegation failed: #{inspect(reason)}"}, run}
+        {:error, reason} -> {{:error, "Delegation failed: #{inspect(reason)}"}, nil}
       end
     end
 
     task_ref = Task.Supervisor.async_nolink(RlmMinimalEx.TaskSupervisor, worker_fn)
 
     case Task.yield(task_ref, :timer.minutes(2)) || Task.shutdown(task_ref) do
-      {:ok, result} -> result
-      {:exit, reason} -> {:error, "Worker crashed: #{inspect(reason)}"}
-      nil -> {:error, "Worker timed out"}
+      {:ok, {result, child_run}} -> {result, child_run}
+      {:exit, reason} -> {{:error, "Worker crashed: #{inspect(reason)}"}, nil}
+      nil -> {{:error, "Worker timed out"}, nil}
     end
   end
 
