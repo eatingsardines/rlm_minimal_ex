@@ -2,7 +2,7 @@ defmodule RlmMinimalEx.SessionTest do
   use ExUnit.Case, async: true
 
   alias RlmMinimalEx.{Environment, Session}
-  alias RlmMinimalEx.Trajectory.ModelCall
+  alias RlmMinimalEx.Trajectory.{ModelCall, Run}
 
   defp text_model(text) do
     fn _model, _messages, _opts ->
@@ -325,7 +325,15 @@ defmodule RlmMinimalEx.SessionTest do
 
     [step1 | _] = run.steps
     delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
+    assert length(run.root_steps) == 2
+    assert length(run.steps) == 3
+    assert Enum.at(run.steps, 1).path == [0, 0, 0]
+    assert length(Run.delegate_steps(run)) == 1
+    assert Run.pretty_timeline(run) =~ "[0] turn=0 tool_calls actions=[delegate_subtask]"
+    assert Run.pretty_timeline(run) =~ "[0.0.0] turn=0 text"
     assert delegate_action.executor == :session
+    assert delegate_action.child_run.status == :completed
+    assert delegate_action.child_run.answer == "4"
   end
 
   test "delegate_subtask runs a nested worker session against scoped context beyond 4 KB" do
@@ -432,7 +440,20 @@ defmodule RlmMinimalEx.SessionTest do
 
     [step1 | _] = run.steps
     delegate_action = Enum.find(step1.actions, &(&1.name == :delegate_subtask))
+    assert length(run.root_steps) == 2
+    assert length(run.steps) == 4
+    assert Enum.at(run.steps, 1).path == [0, 0, 0]
+    assert Enum.at(run.steps, 2).path == [0, 0, 1]
+    assert length(Run.delegate_steps(run)) == 2
+    assert Run.pretty_timeline(run) =~ "[0.0.0] turn=0 tool_calls actions=[search_context]"
+    assert Run.pretty_timeline(run) =~ "[0.0.1] turn=1 text"
     assert delegate_action.result == "worker saw sentinel"
+    assert delegate_action.child_run.status == :completed
+    assert delegate_action.child_run.answer == "worker saw sentinel"
+    assert length(delegate_action.child_run.steps) == 2
+
+    assert hd(delegate_action.child_run.steps).actions |> hd() |> Map.get(:name) ==
+             :search_context
   end
 
   test "delegate_subtask can scope a nested worker to a large stored variable beyond 4 KB" do
