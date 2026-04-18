@@ -570,35 +570,33 @@ defmodule RlmMinimalEx.SessionTest do
           _ -> false
         end)
 
-      cond do
-        is_worker ->
-          call = %{
-            id: "call_worker_timeout",
-            name: "read_var",
-            arguments: %{"name" => "context"}
-          }
+      if is_worker do
+        call = %{
+          id: "call_worker_timeout",
+          name: "read_var",
+          arguments: %{"name" => "context"}
+        }
 
-          {:ok, :tool_calls, [call],
-           %{mc | response_type: :tool_calls, tool_calls_made: ["read_var"]}}
+        {:ok, :tool_calls, [call],
+         %{mc | response_type: :tool_calls, tool_calls_made: ["read_var"]}}
+      else
+        n = :counters.get(call_count, 1)
+        :counters.add(call_count, 1, 1)
 
-        true ->
-          n = :counters.get(call_count, 1)
-          :counters.add(call_count, 1, 1)
+        case n do
+          0 ->
+            call = %{
+              id: "call_delegate_timeout",
+              name: "delegate_subtask",
+              arguments: %{"task" => "Keep reading forever"}
+            }
 
-          case n do
-            0 ->
-              call = %{
-                id: "call_delegate_timeout",
-                name: "delegate_subtask",
-                arguments: %{"task" => "Keep reading forever"}
-              }
+            {:ok, :tool_calls, [call],
+             %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
 
-              {:ok, :tool_calls, [call],
-               %{mc | response_type: :tool_calls, tool_calls_made: ["delegate_subtask"]}}
-
-            _ ->
-              {:ok, :text, "outer recovered", mc}
-          end
+          _ ->
+            {:ok, :text, "outer recovered", mc}
+        end
       end
     end
 

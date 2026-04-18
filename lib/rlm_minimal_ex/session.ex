@@ -155,21 +155,17 @@ defmodule RlmMinimalEx.Session do
   end
 
   defp resolve_env(opts) do
-    case opts[:env_pid] do
-      pid when is_pid(pid) ->
-        pid
+    opts[:env_pid] || resolve_env_from_run_id(opts[:run_id])
+  end
 
-      nil ->
-        case opts[:run_id] do
-          nil ->
-            raise "Session requires either :env_pid or :run_id"
+  defp resolve_env_from_run_id(nil) do
+    raise "Session requires either :env_pid or :run_id"
+  end
 
-          run_id ->
-            case Registry.lookup(RlmMinimalEx.Registry, {:env, run_id}) do
-              [{pid, _}] -> pid
-              [] -> raise "Environment not found for run_id #{inspect(run_id)}"
-            end
-        end
+  defp resolve_env_from_run_id(run_id) do
+    case Registry.lookup(RlmMinimalEx.Registry, {:env, run_id}) do
+      [{pid, _}] -> pid
+      [] -> raise "Environment not found for run_id #{inspect(run_id)}"
     end
   end
 

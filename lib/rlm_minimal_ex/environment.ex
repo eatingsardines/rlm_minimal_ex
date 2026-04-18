@@ -334,25 +334,28 @@ defmodule RlmMinimalEx.Environment do
   defp byte_size_of(v), do: v |> :erlang.term_to_binary() |> byte_size()
 
   defp init_var_meta(context, query) do
-    meta = %{}
+    %{}
+    |> maybe_put_context_meta(context)
+    |> maybe_put_query_meta(query)
+  end
 
-    meta =
-      if context,
-        do:
-          Map.put(meta, "context", %{
-            type: type_of(context),
-            created_at: DateTime.utc_now(),
-            size: byte_size_of(context)
-          }),
-        else: meta
+  defp maybe_put_context_meta(meta, nil), do: meta
 
-    if query,
-      do:
-        Map.put(meta, "query", %{
-          type: :string,
-          created_at: DateTime.utc_now(),
-          size: byte_size_of(query)
-        }),
-      else: meta
+  defp maybe_put_context_meta(meta, context) do
+    Map.put(meta, "context", %{
+      type: type_of(context),
+      created_at: DateTime.utc_now(),
+      size: byte_size_of(context)
+    })
+  end
+
+  defp maybe_put_query_meta(meta, nil), do: meta
+
+  defp maybe_put_query_meta(meta, query) do
+    Map.put(meta, "query", %{
+      type: :string,
+      created_at: DateTime.utc_now(),
+      size: byte_size_of(query)
+    })
   end
 end

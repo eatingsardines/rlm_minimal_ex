@@ -71,26 +71,7 @@ defmodule RlmMinimalEx.Model do
 
     with {:ok, choice} <- extract_choice(body),
          {:ok, message} <- extract_message(choice) do
-      case message["tool_calls"] do
-        nil ->
-          {:ok, :text, message["content"] || "",
-           %{model_call | response_type: :text, tool_calls_made: []}}
-
-        tool_calls when is_list(tool_calls) ->
-          case parse_tool_calls(tool_calls) do
-            {:ok, parsed} ->
-              names = Enum.map(parsed, & &1.name)
-
-              {:ok, :tool_calls, parsed,
-               %{model_call | response_type: :tool_calls, tool_calls_made: names}}
-
-            {:error, _} = err ->
-              err
-          end
-
-        _other ->
-          {:error, {:malformed_response, "unexpected tool_calls shape"}}
-      end
+      parse_message_response(message, model_call)
     end
   end
 
@@ -99,6 +80,30 @@ defmodule RlmMinimalEx.Model do
 
   defp extract_message(%{"message" => msg}) when is_map(msg), do: {:ok, msg}
   defp extract_message(choice), do: {:error, {:malformed_response, "no message", choice}}
+
+  defp parse_message_response(%{"tool_calls" => nil} = message, model_call) do
+    {:ok, :text, message["content"] || "",
+     %{model_call | response_type: :text, tool_calls_made: []}}
+  end
+
+  defp parse_message_response(%{"tool_calls" => tool_calls}, model_call)
+       when is_list(tool_calls) do
+    with {:ok, parsed} <- parse_tool_calls(tool_calls) do
+      names = Enum.map(parsed, & &1.name)
+
+      {:ok, :tool_calls, parsed,
+       %{model_call | response_type: :tool_calls, tool_calls_made: names}}
+    end
+  end
+
+  defp parse_message_response(%{"tool_calls" => _other}, _model_call) do
+    {:error, {:malformed_response, "unexpected tool_calls shape"}}
+  end
+
+  defp parse_message_response(message, model_call) do
+    {:ok, :text, message["content"] || "",
+     %{model_call | response_type: :text, tool_calls_made: []}}
+  end
 
   defp parse_tool_calls(tool_calls) do
     Enum.reduce_while(tool_calls, {:ok, []}, fn tc, {:ok, acc} ->
