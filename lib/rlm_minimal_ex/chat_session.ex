@@ -74,6 +74,14 @@ defmodule RlmMinimalEx.ChatSession do
   end
 
   @doc """
+  Returns a compact status snapshot for the live chat session.
+  """
+  @spec status(pid()) :: map()
+  def status(pid) do
+    GenServer.call(pid, :status)
+  end
+
+  @doc """
   Returns the most recent run for the chat session, if one exists.
   """
   @spec last_run(pid()) :: Run.t() | nil
@@ -153,7 +161,7 @@ defmodule RlmMinimalEx.ChatSession do
     run_opts = build_run_opts(state)
 
     task =
-      Task.Supervisor.async_nolink(RlmMinimalEx.TaskSupervisor, fn ->
+      Task.Supervisor.async_nolink(RlmMinimalEx.ChatTaskSupervisor, fn ->
         run_fun.(context, query, run_opts)
       end)
 
@@ -168,6 +176,11 @@ defmodule RlmMinimalEx.ChatSession do
   @impl true
   def handle_call(:runs, _from, state) do
     {:reply, Enum.reverse(state.runs), state}
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    {:reply, chat_status(state), state}
   end
 
   @impl true
@@ -220,6 +233,12 @@ defmodule RlmMinimalEx.ChatSession do
     {:noreply, state}
   end
 
+  @impl true
+  def terminate(_reason, state) do
+    shutdown_in_flight_task(state.in_flight)
+    :ok
+  end
+
   defp build_run_opts(state) do
     case conversation_history(state) do
       [] -> state.run_opts
@@ -256,6 +275,34 @@ defmodule RlmMinimalEx.ChatSession do
 
   defp clear_in_flight(state) do
     %{state | in_flight: nil}
+  end
+
+  defp chat_status(state) do
+    %{
+      busy?: state.in_flight != nil,
+      in_flight_query: state.in_flight && state.in_flight.query,
+      transcript_message_count: length(state.transcript),
+      run_count: length(state.runs),
+      context_loaded?: not is_nil(state.context),
+      last_answer_preview: preview(state.last_answer)
+    }
+  end
+
+  defp shutdown_in_flight_task(nil), do: :ok
+
+  defp shutdown_in_flight_task(%{task: %Task{} = task}) do
+    Task.shutdown(task, :brutal_kill)
+    :ok
+  end
+
+  defp preview(nil), do: nil
+
+  defp preview(text) when is_binary(text) do
+    if String.length(text) > 120 do
+      String.slice(text, 0, 120) <> "..."
+    else
+      text
+    end
   end
 
   defp normalize_run_result(query, {:error, reason}) do

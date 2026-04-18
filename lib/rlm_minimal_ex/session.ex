@@ -15,13 +15,14 @@ defmodule RlmMinimalEx.Session do
   """
   use GenServer
 
-  alias RlmMinimalEx.{Actions, Environment, Trajectory}
+  alias RlmMinimalEx.{Actions, Environment, RuntimeTelemetry, Trajectory}
   alias Trajectory.{Action, Run, Step}
 
   @default_model "gpt-5.4-nano"
 
   defstruct [
     :env_pid,
+    :task_supervisor,
     :model_name,
     :model_fn,
     :query,
@@ -31,7 +32,8 @@ defmodule RlmMinimalEx.Session do
     :run,
     :reply_to,
     :system_prompt,
-    :conversation_history
+    :conversation_history,
+    :in_flight_turn
   ]
 
   @doc """
@@ -54,12 +56,21 @@ defmodule RlmMinimalEx.Session do
     GenServer.call(pid, {:run, query}, :timer.minutes(5))
   end
 
+  @doc """
+  Returns a compact status snapshot for the live session process.
+  """
+  def status(pid) do
+    GenServer.call(pid, :status)
+  end
+
   @impl true
   def init(opts) do
     env_pid = resolve_env(opts)
+    task_supervisor = resolve_task_supervisor(opts)
 
     state = %__MODULE__{
       env_pid: env_pid,
+      task_supervisor: task_supervisor,
       model_name:
         opts[:model] ||
           System.get_env("RLM_MINIMAL_EX_MODEL") ||
@@ -71,7 +82,8 @@ defmodule RlmMinimalEx.Session do
       run: nil,
       reply_to: nil,
       system_prompt: opts[:system_prompt] || default_system_prompt(),
-      conversation_history: opts[:conversation_history] || []
+      conversation_history: opts[:conversation_history] || [],
+      in_flight_turn: nil
     }
 
     {:ok, state}
@@ -83,9 +95,22 @@ defmodule RlmMinimalEx.Session do
 
     messages = initial_messages(state, query)
 
-    state = %{state | query: query, messages: messages, run: run, reply_to: from}
+    state = %{
+      state
+      | query: query,
+        messages: messages,
+        run: run,
+        reply_to: from,
+        in_flight_turn: nil
+    }
+
     send(self(), {:do_turn, 0})
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    {:reply, session_status(state), state}
   end
 
   @impl true
@@ -96,36 +121,51 @@ defmodule RlmMinimalEx.Session do
   end
 
   @impl true
-  def handle_info({:do_turn, turn}, state) do
-    tools = Actions.to_tool_definitions(state.lane)
-    turn_start = System.monotonic_time(:millisecond)
+  def handle_info({:do_turn, turn}, %{in_flight_turn: nil} = state) do
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        execute_turn(turn, state)
+      end)
 
-    case state.model_fn.(state.model_name, state.messages, tools: tools) do
-      {:ok, :text, content, model_call} ->
+    {:noreply, %{state | in_flight_turn: %{task: task, turn: turn}}}
+  end
+
+  @impl true
+  def handle_info({:do_turn, _turn}, state) do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(
+        {ref, result},
+        %{in_flight_turn: %{task: %Task{ref: ref}, turn: turn}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | in_flight_turn: nil}
+
+    case result do
+      {:text, content, model_call, duration_ms} ->
         step = %Step{
           path: [turn],
           turn: turn,
           model_call: model_call,
           assistant_text: content,
           actions: [],
-          duration_ms: System.monotonic_time(:millisecond) - turn_start
+          duration_ms: duration_ms
         }
 
         run = state.run |> Run.add_step(step) |> Run.complete(content)
         GenServer.reply(state.reply_to, {:ok, content, run})
         {:noreply, %{state | run: run}}
 
-      {:ok, :tool_calls, calls, model_call} ->
-        {action_entries, tool_messages} = execute_tool_calls(calls, state)
-        child_runs = child_runs(action_entries)
-
+      {:tool_calls, calls, model_call, action_entries, tool_messages, child_runs, duration_ms} ->
         step = %Step{
           path: [turn],
           turn: turn,
           model_call: model_call,
           assistant_text: nil,
           actions: action_entries,
-          duration_ms: System.monotonic_time(:millisecond) - turn_start
+          duration_ms: duration_ms
         }
 
         # Recreate the assistant tool-call message so the next provider turn sees
@@ -158,8 +198,65 @@ defmodule RlmMinimalEx.Session do
     end
   end
 
+  @impl true
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{in_flight_turn: %{task: %Task{ref: ref}}} = state
+      ) do
+    run = Run.fail(state.run)
+    GenServer.reply(state.reply_to, {:error, {:task_exit, reason}, run})
+    {:noreply, %{state | run: run, in_flight_turn: nil}}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    shutdown_in_flight_task(state.in_flight_turn)
+    :ok
+  end
+
   defp resolve_env(opts) do
     opts[:env_pid] || resolve_env_from_run_id(opts[:run_id])
+  end
+
+  defp resolve_task_supervisor(opts) do
+    cond do
+      opts[:task_supervisor] ->
+        opts[:task_supervisor]
+
+      opts[:run_id] ->
+        resolve_task_supervisor_from_run_id(opts[:run_id])
+
+      true ->
+        RlmMinimalEx.ChatTaskSupervisor
+    end
+  end
+
+  defp execute_turn(_turn, state) do
+    tools = Actions.to_tool_definitions(state.lane)
+    turn_start = System.monotonic_time(:millisecond)
+
+    case state.model_fn.(state.model_name, state.messages, tools: tools) do
+      {:ok, :text, content, model_call} ->
+        duration_ms = elapsed_ms(turn_start)
+        emit_model_call_telemetry(model_call, state, duration_ms, :ok)
+        {:text, content, model_call, duration_ms}
+
+      {:ok, :tool_calls, calls, model_call} ->
+        {action_entries, tool_messages} = execute_tool_calls(calls, state)
+        child_runs = child_runs(action_entries)
+        duration_ms = elapsed_ms(turn_start)
+        emit_model_call_telemetry(model_call, state, duration_ms, :ok)
+
+        {:tool_calls, calls, model_call, action_entries, tool_messages, child_runs, duration_ms}
+
+      {:error, reason} ->
+        emit_model_error_telemetry(state, tools, turn_start, reason)
+        {:error, reason}
+    end
+  end
+
+  defp elapsed_ms(start_ms) do
+    System.monotonic_time(:millisecond) - start_ms
   end
 
   defp resolve_env_from_run_id(nil) do
@@ -170,6 +267,17 @@ defmodule RlmMinimalEx.Session do
     case Registry.lookup(RlmMinimalEx.Registry, {:env, run_id}) do
       [{pid, _}] -> pid
       [] -> raise "Environment not found for run_id #{inspect(run_id)}"
+    end
+  end
+
+  defp resolve_task_supervisor_from_run_id(nil) do
+    raise "Session requires either :task_supervisor or :run_id"
+  end
+
+  defp resolve_task_supervisor_from_run_id(run_id) do
+    case Registry.lookup(RlmMinimalEx.Registry, {:task_sup, run_id}) do
+      [{pid, _}] -> pid
+      [] -> raise "Task supervisor not found for run_id #{inspect(run_id)}"
     end
   end
 
@@ -246,6 +354,7 @@ defmodule RlmMinimalEx.Session do
   defp do_delegate(params, state) do
     task = params["task"]
     context_name = params["context_var"] || "context"
+    delegate_start = System.monotonic_time(:millisecond)
 
     worker_opts = [
       model: state.model_name,
@@ -258,18 +367,28 @@ defmodule RlmMinimalEx.Session do
 
     worker_fn = fn ->
       case RlmMinimalEx.run(nil, task, worker_opts) do
-        {:ok, answer, run} -> {{:ok, answer}, run}
-        {:error, reason, run} -> {{:error, "Delegation failed: #{inspect(reason)}"}, run}
+        {:ok, answer, run} ->
+          {{:ok, answer}, run}
+
+        {:error, {:task_exit, reason}, run} ->
+          {{:error, "Worker crashed: #{inspect(reason)}"}, run}
+
+        {:error, reason, run} ->
+          {{:error, "Delegation failed: #{inspect(reason)}"}, run}
       end
     end
 
-    task_ref = Task.Supervisor.async_nolink(RlmMinimalEx.TaskSupervisor, worker_fn)
+    task_ref = Task.Supervisor.async_nolink(state.task_supervisor, worker_fn)
 
-    case Task.yield(task_ref, :timer.minutes(2)) || Task.shutdown(task_ref) do
-      {:ok, {result, child_run}} -> {result, child_run}
-      {:exit, reason} -> {{:error, "Worker crashed: #{inspect(reason)}"}, nil}
-      nil -> {{:error, "Worker timed out"}, nil}
-    end
+    delegate_result =
+      case Task.yield(task_ref, :timer.minutes(2)) || Task.shutdown(task_ref) do
+        {:ok, {result, child_run}} -> {result, child_run}
+        {:exit, reason} -> {{:error, "Worker crashed: #{inspect(reason)}"}, nil}
+        nil -> {{:error, "Worker timed out"}, nil}
+      end
+
+    emit_delegate_telemetry(delegate_result, context_name, delegate_start)
+    delegate_result
   end
 
   defp normalize_action_name(name) when is_atom(name), do: name
@@ -279,6 +398,92 @@ defmodule RlmMinimalEx.Session do
       %{name: action_name} -> action_name
       nil -> name
     end
+  end
+
+  defp session_status(state) do
+    %{
+      query: state.query,
+      lane: state.lane,
+      max_turns: state.max_turns,
+      message_count: length(state.messages),
+      conversation_history_count: length(state.conversation_history),
+      run_status: state.run && state.run.status,
+      in_flight_turn: state.in_flight_turn && state.in_flight_turn.turn,
+      busy?: state.in_flight_turn != nil,
+      waiting_on: if(state.in_flight_turn, do: :turn_task, else: :idle),
+      env_pid: state.env_pid,
+      task_supervisor: state.task_supervisor
+    }
+  end
+
+  defp shutdown_in_flight_task(nil), do: :ok
+
+  defp shutdown_in_flight_task(%{task: %Task{} = task}) do
+    Task.shutdown(task, :brutal_kill)
+    :ok
+  end
+
+  defp emit_model_call_telemetry(model_call, state, duration_ms, status) do
+    RuntimeTelemetry.execute(
+      [:model, :call, :stop],
+      %{duration_ms: duration_ms},
+      %{
+        status: status,
+        model: model_call.model,
+        lane: state.lane,
+        response_type: model_call.response_type,
+        messages_in: model_call.messages_in,
+        tools_offered_count: length(model_call.tools_offered || []),
+        tool_calls_made_count: length(model_call.tool_calls_made || []),
+        input_tokens: model_call.input_tokens,
+        output_tokens: model_call.output_tokens
+      }
+    )
+  end
+
+  defp emit_model_error_telemetry(state, tools, turn_start, reason) do
+    RuntimeTelemetry.execute(
+      [:model, :call, :stop],
+      %{duration_ms: elapsed_ms(turn_start)},
+      %{
+        status: :error,
+        model: state.model_name,
+        lane: state.lane,
+        response_type: :error,
+        messages_in: length(state.messages),
+        tools_offered_count: length(tools),
+        tool_calls_made_count: 0,
+        reason: inspect(reason)
+      }
+    )
+  end
+
+  defp emit_delegate_telemetry({result, child_run}, context_name, delegate_start) do
+    metadata =
+      case result do
+        {:ok, _answer} ->
+          %{
+            status: :ok,
+            context_var: context_name,
+            child_status: child_run && child_run.status,
+            child_tokens: child_run && child_run.total_tokens
+          }
+
+        {:error, reason} ->
+          %{
+            status: :error,
+            context_var: context_name,
+            reason: reason,
+            child_status: child_run && child_run.status,
+            child_tokens: child_run && child_run.total_tokens
+          }
+      end
+
+    RuntimeTelemetry.execute(
+      [:delegate, :stop],
+      %{duration_ms: elapsed_ms(delegate_start)},
+      metadata
+    )
   end
 
   defp default_system_prompt do

@@ -2,9 +2,10 @@ defmodule RlmMinimalEx do
   @moduledoc """
   Minimal BEAM-native runtime for recursive LLM work.
 
-  `run/3` starts a supervised runtime pair:
+  `run/3` starts a supervised runtime tree:
 
   - `RlmMinimalEx.Environment`, which owns externalized state for the run
+  - a per-run `Task.Supervisor`, which owns async turn and worker tasks
   - `RlmMinimalEx.Session`, which owns the model turn loop and orchestration
 
   The model does not receive the full `context` in its first prompt. Context is
@@ -12,6 +13,7 @@ defmodule RlmMinimalEx do
   `read_var` and `search_context`.
   """
 
+  alias RlmMinimalEx.RuntimeTelemetry
   alias RlmMinimalEx.Trajectory.Run
 
   @type conversation_message :: %{role: :user | :assistant, content: String.t()}
@@ -37,6 +39,8 @@ defmodule RlmMinimalEx do
   conversation history.
   """
   def run(context, query, opts \\ []) do
+    run_start = System.monotonic_time(:millisecond)
+
     run_opts = [
       context: context,
       query: query,
@@ -49,6 +53,17 @@ defmodule RlmMinimalEx do
       conversation_history: opts[:conversation_history] || []
     ]
 
+    RuntimeTelemetry.execute(
+      [:run, :start],
+      %{system_time: System.system_time()},
+      %{
+        lane: run_opts[:lane],
+        max_turns: run_opts[:max_turns],
+        conversation_history_count: length(run_opts[:conversation_history]),
+        context_loaded?: not is_nil(context) or not is_nil(run_opts[:context_source])
+      }
+    )
+
     case DynamicSupervisor.start_child(
            RlmMinimalEx.RunsSupervisor,
            {RlmMinimalEx.RunSupervisor, run_opts}
@@ -56,14 +71,20 @@ defmodule RlmMinimalEx do
       {:ok, sup_pid} ->
         session_pid = RlmMinimalEx.RunSupervisor.session(sup_pid)
 
-        try do
-          RlmMinimalEx.Session.run(session_pid, query)
-        after
-          DynamicSupervisor.terminate_child(RlmMinimalEx.RunsSupervisor, sup_pid)
-        end
+        result =
+          try do
+            RlmMinimalEx.Session.run(session_pid, query)
+          after
+            DynamicSupervisor.terminate_child(RlmMinimalEx.RunsSupervisor, sup_pid)
+          end
+
+        emit_run_stop(result, run_start)
+        result
 
       {:error, reason} ->
-        {:error, reason, Run.new(query) |> Run.fail()}
+        result = {:error, reason, Run.new(query) |> Run.fail()}
+        emit_run_stop(result, run_start)
+        result
     end
   end
 
@@ -76,5 +97,27 @@ defmodule RlmMinimalEx do
       {:ok, answer, _run} -> answer
       {:error, reason, _run} -> raise "RlmMinimalEx.run! failed: #{inspect(reason)}"
     end
+  end
+
+  defp emit_run_stop(result, run_start) do
+    metadata =
+      case result do
+        {:ok, _answer, run} ->
+          %{status: run.status, total_tokens: run.total_tokens, step_count: length(run.steps)}
+
+        {:error, reason, run} ->
+          %{
+            status: run.status,
+            reason: inspect(reason),
+            total_tokens: run.total_tokens,
+            step_count: length(run.steps)
+          }
+      end
+
+    RuntimeTelemetry.execute(
+      [:run, :stop],
+      %{duration_ms: System.monotonic_time(:millisecond) - run_start},
+      metadata
+    )
   end
 end
