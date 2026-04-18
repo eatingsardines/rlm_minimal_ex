@@ -161,10 +161,13 @@ defmodule RlmMinimalEx.Model do
   defp maybe_add_tools(body, tools), do: Map.put(body, "tools", tools)
 
   defp resolve_api_key(opts) do
+    RlmMinimalEx.Env.load_dotenv()
+
     case Keyword.get(opts, :api_key) ||
-           Application.get_env(:rlm_minimal_ex, :openai_api_key) ||
-           System.get_env("OPENAI_API_KEY") do
+           System.get_env("OPENAI_API_KEY") ||
+           Application.get_env(:rlm_minimal_ex, :openai_api_key) do
       nil -> {:error, :missing_api_key}
+      key when key in ["", "your-key-here", "your-openai-key-here"] -> {:error, :missing_api_key}
       key -> {:ok, key}
     end
   end

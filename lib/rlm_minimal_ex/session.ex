@@ -52,15 +52,15 @@ defmodule RlmMinimalEx.Session do
 
   @impl true
   def init(opts) do
+    RlmMinimalEx.Env.load_dotenv()
     env_pid = resolve_env(opts)
 
     state = %__MODULE__{
       env_pid: env_pid,
       model_name:
         opts[:model] ||
-          Application.get_env(:rlm_minimal_ex, :default_model) ||
           System.get_env("RLM_MINIMAL_EX_MODEL") ||
-          "gpt-4o",
+          Application.get_env(:rlm_minimal_ex, :default_model, "gpt-5.4-nano"),
       model_fn: opts[:model_fn] || (&RlmMinimalEx.Model.chat/3),
       lane: opts[:lane] || :read_only,
       max_turns: opts[:max_turns] || 8,
