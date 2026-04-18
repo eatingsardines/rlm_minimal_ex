@@ -2,6 +2,17 @@
 
 Minimal BEAM-native runtime for recursive LLM work.
 
+This repo keeps the minimal runtime kernel plus the parity upgrades that make
+the externalized-context workflow practical on the BEAM:
+
+- `RlmMinimalEx.run/3`
+- per-run supervision
+- externalized run state in `Environment`
+- a model turn loop in `Session`
+- typed tool definitions in `Actions`
+- structured run traces in `Trajectory`
+- delegated nested worker sessions via `Task.Supervisor`
+
 ## Quick Start
 
 ```bash
@@ -16,13 +27,13 @@ Edit `.env`:
 OPENAI_API_KEY=your-key-here
 ```
 
+Paste your API key and save the file.
+
 Start IEx:
 
 ```bash
 iex -S mix
 ```
-
-Paste your API key and save the file.
 
 Run tests:
 
@@ -39,6 +50,51 @@ If you want a different model on your machine, add this line to `.env`:
 ```dotenv
 RLM_MINIMAL_EX_MODEL=your-openai-model
 ```
+
+## Runtime Shape
+
+The root model does not receive the full `context` in its initial prompt.
+Instead, the context is stored in environment-owned state and must be inspected
+through tools.
+
+A single `RlmMinimalEx.run/3` call starts a per-run supervision tree with:
+
+- one `RlmMinimalEx.Environment`
+- one `RlmMinimalEx.Session`
+
+The coordinator session:
+
+1. starts with only the system prompt and the user query
+2. offers the model a typed tool surface
+3. executes any tool calls against the environment or session
+4. appends tool results back into the message history
+5. repeats until the model returns plain text
+
+`delegate_subtask` starts a nested `RlmMinimalEx.run/3` with its own scoped
+environment and session, so delegated work is real recursive runtime behavior
+rather than a one-shot prompt wrapper.
+
+## Runtime Semantics
+
+- Context is externalized. The model should inspect it with tools before answering.
+- Scratchpad writes are allowed in `:read_only` through `write_scratchpad`.
+- General writes remain lane-gated through `write_var`.
+- Delegated workers inherit the runtime model function and run their own tool loop.
+- Max-turn exhaustion is explicit: the runtime returns `{:error, :max_turns_exceeded, run}` and sets `run.status` to `:timeout`.
+- Model, action, and token metadata are recorded in the returned trajectory.
+
+## Tool Surface
+
+- `read_var` - Read a stored variable and get a short preview of its contents.
+- `write_var` - Store a named variable when the runtime is in `:workspace` mode.
+- `write_scratchpad` - Save intermediate notes under the reserved `scratch:` namespace.
+- `slice_text` - Cut out a substring from a source value and optionally store it as a new variable.
+- `read_text_range` - Read a character range from a stored string variable.
+- `read_lines` - Read an inclusive line range from a stored string variable.
+- `search_context` - Search the externalized context line by line for a query string.
+- `list_vars` - List the variables currently stored in the environment with basic metadata.
+- `describe_var` - Show detailed metadata and a preview for one stored variable.
+- `delegate_subtask` - Start a nested worker run against the full context or a scoped variable.
 
 ## Smoke Tests
 
@@ -103,34 +159,7 @@ RlmMinimalEx.Trajectory.Run.delegate_steps(run)
 RlmMinimalEx.Trajectory.Run.pretty_timeline(run)
 ```
 
-## What It Does
-
-`RlmMinimalEx.run/3` keeps long context outside the model's initial prompt. The
-model inspects that externalized context through tools, and it can delegate
-focused subtasks to nested worker runs.
-
-Each run starts:
-
-- one `RlmMinimalEx.Environment`
-- one `RlmMinimalEx.Session`
-
-`delegate_subtask` starts another `RlmMinimalEx.run/3` with its own scoped
-environment and session.
-
-## Tool Surface
-
-- `read_var` - Read a stored variable and get a short preview of its contents.
-- `write_var` - Store a named variable when the runtime is in `:workspace` mode.
-- `write_scratchpad` - Save intermediate notes under the reserved `scratch:` namespace.
-- `slice_text` - Cut out a substring from a source value and optionally store it as a new variable.
-- `read_text_range` - Read a character range from a stored string variable.
-- `read_lines` - Read an inclusive line range from a stored string variable.
-- `search_context` - Search the externalized context line by line for a query string.
-- `list_vars` - List the variables currently stored in the environment with basic metadata.
-- `describe_var` - Show detailed metadata and a preview for one stored variable.
-- `delegate_subtask` - Start a nested worker run against the full context or a scoped variable.
-
-## Return values
+## Return Values
 
 `RlmMinimalEx.run/3` returns one of:
 
