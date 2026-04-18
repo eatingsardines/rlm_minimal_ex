@@ -84,7 +84,7 @@ export OPENAI_API_KEY="your-key-here"
 Optional model override:
 
 ```bash
-export RLM_MINIMAL_EX_MODEL="gpt-5.3-nano"
+export RLM_MINIMAL_EX_MODEL="gpt-5.4-nano"
 ```
 
 Start IEx:
