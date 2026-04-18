@@ -1,8 +1,6 @@
 defmodule RlmMinimalEx.CLITest do
   use ExUnit.Case, async: true
 
-  import ExUnit.CaptureIO
-
   alias RlmMinimalEx.CLI
   alias RlmMinimalEx.Trajectory.{ModelCall, Run, Step}
 
@@ -33,38 +31,118 @@ defmodule RlmMinimalEx.CLITest do
     |> Run.complete(answer)
   end
 
-  test "interactive mode runs pasted context and exits" do
+  defp scripted_io(opts) do
+    {:ok, agent} =
+      Agent.start_link(fn ->
+        %{
+          gets: Keyword.get(opts, :gets, []),
+          puts: []
+        }
+      end)
+
+    io = %{
+      puts: fn message ->
+        Agent.update(agent, fn state ->
+          update_in(state.puts, &[message | &1])
+        end)
+      end,
+      gets: fn _prompt ->
+        Agent.get_and_update(agent, fn
+          %{gets: [next | rest]} = state -> {next, %{state | gets: rest}}
+          state -> {nil, state}
+        end)
+      end
+    }
+
+    get_output = fn ->
+      agent
+      |> Agent.get(&Enum.reverse(&1.puts))
+      |> Enum.join("\n")
+    end
+
+    {io, get_output}
+  end
+
+  test "interactive mode runs pasted context with multiline content and exits" do
     parent = self()
 
     run_fun = fn context, query, opts ->
       send(parent, {:run_called, context, query, opts})
-      {:ok, "ORCHID-9137-DELTA", completed_run(query, "ORCHID-9137-DELTA", tokens: 22)}
+      {:ok, "example answer", completed_run(query, "example answer", tokens: 22)}
     end
 
-    input = """
-    1
-    alpha
-    sentinel token: ORCHID-9137-DELTA
-    omega
+    {io, get_output} =
+      scripted_io(
+        gets: [
+          "1\n",
+          "alpha\n",
+          "\n",
+          "middle line\n",
+          "omega\n",
+          "/done\n",
+          "What is in the example context?\n",
+          "4\n"
+        ]
+      )
 
-    Find the sentinel token.
-    4
-    """
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
 
-    output =
-      capture_io(input, fn ->
-        assert :ok = CLI.start(run_fun: run_fun)
-      end)
+    assert_receive {:run_called, "alpha\n\nmiddle line\nomega\n",
+                    "What is in the example context?", []}
 
-    assert_receive {:run_called, "alpha\nsentinel token: ORCHID-9137-DELTA\nomega\n",
-                    "Find the sentinel token.", []}
+    output = get_output.()
 
     assert output =~ "How do you want to provide context?"
     assert output =~ "Paste your context below."
+    assert output =~ "Type /done on its own line, then press Enter."
     assert output =~ "Answer:"
-    assert output =~ "ORCHID-9137-DELTA"
+    assert output =~ "example answer"
     assert output =~ "Status: completed"
     assert output =~ "Tokens: 22"
+  end
+
+  test "interactive mode explains Ctrl+D paste termination and exits cleanly" do
+    {io, get_output} =
+      scripted_io(
+        gets: [
+          "1\n",
+          "first pasted line\n"
+        ]
+      )
+
+    assert :ok = CLI.start(io: io)
+
+    output = get_output.()
+
+    assert output =~ "Paste your context below."
+    assert output =~ "Type /done on its own line, then press Enter."
+    assert output =~ "Paste ended with Ctrl+D."
+    assert output =~ "finish paste with `/done`"
+    refute output =~ "What do you want to ask?"
+  end
+
+  test "interactive mode can treat unexpected first input as pasted context" do
+    parent = self()
+
+    run_fun = fn context, query, opts ->
+      send(parent, {:run_called, context, query, opts})
+      {:ok, "done", completed_run(query, "done")}
+    end
+
+    {io, _get_output} =
+      scripted_io(
+        gets: [
+          "first context line\n",
+          "second context line\n",
+          "/done\n",
+          "what matters?\n",
+          "4\n"
+        ]
+      )
+
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
+
+    assert_receive {:run_called, "first context line\nsecond context line\n", "what matters?", []}
   end
 
   test "interactive mode can load context from file" do
@@ -79,16 +157,10 @@ defmodule RlmMinimalEx.CLITest do
       {:ok, "done", completed_run(query, "done")}
     end
 
-    input = """
-    2
-    #{path}
-    What is in the file?
-    4
-    """
+    {io, _get_output} =
+      scripted_io(gets: ["2\n", "#{path}\n", "What is in the file?\n", "4\n"])
 
-    capture_io(input, fn ->
-      assert :ok = CLI.start(run_fun: run_fun)
-    end)
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
 
     assert_receive {:run_called, "context from file", "What is in the file?", []}
 
@@ -103,19 +175,20 @@ defmodule RlmMinimalEx.CLITest do
       {:ok, "answer for #{query}", completed_run(query, "answer for #{query}")}
     end
 
-    input = """
-    1
-    shared context
+    {io, _get_output} =
+      scripted_io(
+        gets: [
+          "1\n",
+          "shared context\n",
+          "/done\n",
+          "first question\n",
+          "1\n",
+          "second question\n",
+          "4\n"
+        ]
+      )
 
-    first question
-    1
-    second question
-    4
-    """
-
-    capture_io(input, fn ->
-      assert :ok = CLI.start(run_fun: run_fun)
-    end)
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
 
     assert_receive {:run_called, "shared context\n", "first question", []}
     assert_receive {:run_called, "shared context\n", "second question", []}
@@ -126,19 +199,12 @@ defmodule RlmMinimalEx.CLITest do
       {:ok, "done", completed_run(query, "done", tokens: 33)}
     end
 
-    input = """
-    1
-    context
+    {io, get_output} =
+      scripted_io(gets: ["1\n", "context\n", "/done\n", "show me the trace\n", "2\n", "4\n"])
 
-    show me the trace
-    2
-    4
-    """
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
 
-    output =
-      capture_io(input, fn ->
-        assert :ok = CLI.start(run_fun: run_fun)
-      end)
+    output = get_output.()
 
     assert output =~ "Run status=completed total_tokens=33"
     assert output =~ "Query: show me the trace"
@@ -153,18 +219,12 @@ defmodule RlmMinimalEx.CLITest do
       {:error, :missing_api_key}
     end
 
-    input = """
-    1
-    context
+    {io, get_output} =
+      scripted_io(gets: ["1\n", "context\n", "/done\n", "why did this fail?\n", "3\n"])
 
-    why did this fail?
-    3
-    """
+    assert :ok = CLI.start(run_fun: run_fun, io: io)
 
-    output =
-      capture_io(input, fn ->
-        assert :ok = CLI.start(run_fun: run_fun)
-      end)
+    output = get_output.()
 
     assert output =~ "Run failed:"
     assert output =~ ":missing_api_key"

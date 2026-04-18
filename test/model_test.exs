@@ -1,5 +1,5 @@
 defmodule RlmMinimalEx.ModelTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   defp user_messages do
     [%{"role" => "user", "content" => "hi"}]

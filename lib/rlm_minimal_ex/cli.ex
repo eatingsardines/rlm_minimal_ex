@@ -3,6 +3,7 @@ defmodule RlmMinimalEx.CLI do
   Interactive terminal interface for `RlmMinimalEx`.
   """
 
+  alias RlmMinimalEx.CLIIO
   alias RlmMinimalEx.Trajectory.Run
 
   @type run_fun ::
@@ -17,8 +18,8 @@ defmodule RlmMinimalEx.CLI do
       last_run: nil
     }
 
-    puts("RlmMinimalEx interactive mode")
-    puts("")
+    say(opts, "RlmMinimalEx interactive mode")
+    blank(opts)
 
     loop(state, opts)
   end
@@ -34,7 +35,7 @@ defmodule RlmMinimalEx.CLI do
   end
 
   defp loop(%{context: context} = state, opts) do
-    case prompt_query() do
+    case prompt_query(opts) do
       {:ok, query} ->
         run_query(%{state | context: context}, query, opts)
 
@@ -49,15 +50,15 @@ defmodule RlmMinimalEx.CLI do
 
     case run_fun.(state.context, query, run_opts) do
       {:ok, answer, run} ->
-        print_success(answer, run)
+        print_success(answer, run, opts)
         post_run_menu(%{state | last_answer: answer, last_run: run}, opts)
 
       {:error, reason, run} ->
-        print_error(reason, run)
+        print_error(reason, run, opts)
         post_error_menu(%{state | last_run: run}, opts)
 
       {:error, reason} ->
-        print_error(reason, nil)
+        print_error(reason, nil, opts)
         post_error_menu(state, opts)
     end
   end
@@ -65,7 +66,7 @@ defmodule RlmMinimalEx.CLI do
   defp prompt_for_context(opts) do
     case opts[:file] do
       nil ->
-        prompt_context_source()
+        prompt_context_source(opts)
 
       path ->
         case load_context_from_file(path) do
@@ -73,81 +74,103 @@ defmodule RlmMinimalEx.CLI do
             {:ok, context}
 
           {:error, reason} ->
-            puts("Could not read #{path}: #{format_file_error(reason)}")
-            puts("")
-            prompt_context_source()
+            say(opts, "Could not read #{path}: #{format_file_error(reason)}")
+            blank(opts)
+            prompt_context_source(opts)
         end
     end
   end
 
-  defp prompt_context_source do
-    puts("How do you want to provide context?")
-    puts("1. Paste text")
-    puts("2. Load from file")
+  defp prompt_context_source(opts) do
+    say(opts, "How do you want to provide context?")
+    say(opts, "1. Paste text")
+    say(opts, "2. Load from file")
 
-    case normalized_gets("> ") do
+    case CLIIO.normalized_gets(io(opts), "> ") do
       "1" ->
-        {:ok, read_pasted_context()}
+        with_pasted_context(opts)
 
       "paste" ->
-        {:ok, read_pasted_context()}
+        with_pasted_context(opts)
 
       "2" ->
-        prompt_context_file()
+        prompt_context_file(opts)
 
       "file" ->
-        prompt_context_file()
+        prompt_context_file(opts)
 
       nil ->
         :halt
 
-      _ ->
-        puts("Please enter 1 or 2.")
-        puts("")
-        prompt_context_source()
+      first_line ->
+        with_pasted_context(opts, first_line <> "\n")
     end
   end
 
-  defp read_pasted_context do
-    puts("Paste your context below.")
-    puts("Finish with a blank line.")
-    puts("If your context needs blank lines, use file mode instead.")
-
-    collect_context_lines([])
-  end
-
-  defp collect_context_lines(lines) do
-    case IO.gets("") do
-      nil ->
-        lines
-        |> Enum.reverse()
-        |> Enum.join()
-
-      :eof ->
-        lines
-        |> Enum.reverse()
-        |> Enum.join()
-
-      line ->
-        if String.trim(line) == "" and lines != [] do
-          lines
-          |> Enum.reverse()
-          |> Enum.join()
+  defp with_pasted_context(opts, initial_content \\ "") do
+    case read_pasted_context(opts, initial_content) do
+      {:ok, context} ->
+        if String.trim(context) == "" do
+          say(opts, "Please paste some context or choose file mode.")
+          blank(opts)
+          prompt_context_source(opts)
         else
-          collect_context_lines([line | lines])
+          {:ok, context}
+        end
+
+      {:eof, context} ->
+        if String.trim(context) == "" do
+          :halt
+        else
+          blank(opts)
+          say(opts, "Paste ended with Ctrl+D.")
+
+          say(
+            opts,
+            "Start `mix rlm.chat` again and finish paste with `/done` so the session stays open for your question."
+          )
+
+          :halt
         end
     end
   end
 
-  defp prompt_context_file do
-    case normalized_gets("Path to context file: ") do
+  defp read_pasted_context(opts, initial_content) do
+    say(opts, "Paste your context below.")
+    say(opts, "Type /done on its own line, then press Enter.")
+
+    case read_pasted_lines(opts, "") do
+      {:done, content} -> {:ok, initial_content <> content}
+      {:eof, content} -> {:eof, initial_content <> content}
+    end
+  end
+
+  defp read_pasted_lines(opts, acc) do
+    case CLIIO.gets(io(opts), "") do
+      nil ->
+        {:eof, acc}
+
+      :eof ->
+        {:eof, acc}
+
+      line ->
+        if String.trim(line) == "/done" do
+          {:done, acc}
+        else
+          read_pasted_lines(opts, acc <> line)
+        end
+    end
+  end
+
+  defp prompt_context_file(opts) do
+    case CLIIO.normalized_gets(io(opts), "Path to context file: ") do
       nil ->
         :halt
 
       "" ->
-        puts("Please enter a file path.")
-        puts("")
-        prompt_context_file()
+        say(opts, "Please enter a file path.")
+        blank(opts)
+        prompt_context_file(opts)
 
       path ->
         case load_context_from_file(path) do
@@ -155,9 +178,9 @@ defmodule RlmMinimalEx.CLI do
             {:ok, context}
 
           {:error, reason} ->
-            puts("Could not read #{path}: #{format_file_error(reason)}")
-            puts("")
-            prompt_context_file()
+            say(opts, "Could not read #{path}: #{format_file_error(reason)}")
+            blank(opts)
+            prompt_context_file(opts)
         end
     end
   end
@@ -166,80 +189,80 @@ defmodule RlmMinimalEx.CLI do
     File.read(path)
   end
 
-  defp prompt_query do
-    puts("What do you want to ask?")
+  defp prompt_query(opts) do
+    say(opts, "What do you want to ask?")
 
-    case normalized_gets("> ") do
+    case CLIIO.normalized_gets(io(opts), "> ") do
       nil ->
         :halt
 
       "" ->
-        puts("Please enter a question.")
-        puts("")
-        prompt_query()
+        say(opts, "Please enter a question.")
+        blank(opts)
+        prompt_query(opts)
 
       query ->
         {:ok, query}
     end
   end
 
-  defp print_success(answer, run) do
-    puts("")
-    puts("Answer:")
-    puts(answer)
-    puts("")
-    puts("Status: #{run.status}")
-    puts("Tokens: #{run.total_tokens}")
-    puts("Root steps: #{length(run.root_steps)}")
-    puts("Timeline steps: #{length(run.steps)}")
-    puts("")
+  defp print_success(answer, run, opts) do
+    blank(opts)
+    say(opts, "Answer:")
+    say(opts, answer)
+    blank(opts)
+    say(opts, "Status: #{run.status}")
+    say(opts, "Tokens: #{run.total_tokens}")
+    say(opts, "Root steps: #{length(run.root_steps)}")
+    say(opts, "Timeline steps: #{length(run.steps)}")
+    blank(opts)
   end
 
-  defp print_error(reason, nil) do
-    puts("")
-    puts("Run failed:")
-    puts(inspect(reason))
-    puts("")
+  defp print_error(reason, nil, opts) do
+    blank(opts)
+    say(opts, "Run failed:")
+    say(opts, inspect(reason))
+    blank(opts)
   end
 
-  defp print_error(reason, run) do
-    puts("")
-    puts("Run failed:")
-    puts(inspect(reason))
-    puts("Status: #{run.status}")
-    puts("")
+  defp print_error(reason, run, opts) do
+    blank(opts)
+    say(opts, "Run failed:")
+    say(opts, inspect(reason))
+    say(opts, "Status: #{run.status}")
+    blank(opts)
   end
 
   defp post_run_menu(state, opts) do
-    puts("What next?")
-    puts("1. Ask another question about the same context")
-    puts("2. Show the detailed timeline")
-    puts("3. Start over with new context")
-    puts("4. Exit")
+    say(opts, "What next?")
+    say(opts, "1. Ask another question about the same context")
+    say(opts, "2. Show the detailed timeline")
+    say(opts, "3. Start over with new context")
+    say(opts, "4. Exit")
 
-    case normalized_gets("> ") do
+    case CLIIO.normalized_gets(io(opts), "> ") do
       "1" ->
-        puts("")
+        blank(opts)
         loop(state, opts)
 
       "ask again" ->
-        puts("")
+        blank(opts)
         loop(state, opts)
 
       "2" ->
-        puts("")
-        puts(Run.detailed_timeline(state.last_run))
-        puts("")
+        blank(opts)
+        say(opts, Run.detailed_timeline(state.last_run))
+        blank(opts)
         post_run_menu(state, opts)
 
       "timeline" ->
-        puts("")
-        puts(Run.detailed_timeline(state.last_run))
-        puts("")
+        blank(opts)
+        say(opts, Run.detailed_timeline(state.last_run))
+        blank(opts)
         post_run_menu(state, opts)
 
       "3" ->
-        puts("")
+        blank(opts)
 
         loop(
           %{state | context: nil, last_answer: nil, last_run: nil},
@@ -247,7 +270,7 @@ defmodule RlmMinimalEx.CLI do
         )
 
       "start over" ->
-        puts("")
+        blank(opts)
 
         loop(
           %{state | context: nil, last_answer: nil, last_run: nil},
@@ -264,29 +287,29 @@ defmodule RlmMinimalEx.CLI do
         :ok
 
       _ ->
-        puts("Please enter 1, 2, 3, or 4.")
-        puts("")
+        say(opts, "Please enter 1, 2, 3, or 4.")
+        blank(opts)
         post_run_menu(state, opts)
     end
   end
 
   defp post_error_menu(state, opts) do
-    puts("What next?")
-    puts("1. Try another question with the same context")
-    puts("2. Start over with new context")
-    puts("3. Exit")
+    say(opts, "What next?")
+    say(opts, "1. Try another question with the same context")
+    say(opts, "2. Start over with new context")
+    say(opts, "3. Exit")
 
-    case normalized_gets("> ") do
+    case CLIIO.normalized_gets(io(opts), "> ") do
       "1" ->
-        puts("")
+        blank(opts)
         loop(state, opts)
 
       "try again" ->
-        puts("")
+        blank(opts)
         loop(state, opts)
 
       "2" ->
-        puts("")
+        blank(opts)
 
         loop(
           %{state | context: nil, last_answer: nil, last_run: nil},
@@ -294,7 +317,7 @@ defmodule RlmMinimalEx.CLI do
         )
 
       "start over" ->
-        puts("")
+        blank(opts)
 
         loop(
           %{state | context: nil, last_answer: nil, last_run: nil},
@@ -311,22 +334,16 @@ defmodule RlmMinimalEx.CLI do
         :ok
 
       _ ->
-        puts("Please enter 1, 2, or 3.")
-        puts("")
+        say(opts, "Please enter 1, 2, or 3.")
+        blank(opts)
         post_error_menu(state, opts)
-    end
-  end
-
-  defp normalized_gets(prompt) do
-    case IO.gets(prompt) do
-      nil -> nil
-      :eof -> nil
-      line -> String.trim(line)
     end
   end
 
   defp format_file_error(:enoent), do: "file not found"
   defp format_file_error(reason), do: :file.format_error(reason) |> to_string()
 
-  defp puts(message), do: IO.puts(message)
+  defp io(opts), do: Keyword.get(opts, :io, CLIIO.default())
+  defp say(opts, message), do: CLIIO.puts(io(opts), message)
+  defp blank(opts), do: say(opts, "")
 end

@@ -44,8 +44,7 @@ Start the interactive CLI:
 mix rlm.chat
 ```
 
-The CLI will ask for your context and your question. In paste mode, finish your
-context with a blank line. If your context needs blank lines, use file mode.
+The CLI will ask for your context and your question.
 
 Start IEx for manual exploration:
 
